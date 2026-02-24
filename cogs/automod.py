@@ -152,6 +152,45 @@ class AutoMod(commands.Cog):
 
         ]
 
+        # Список слів-винятків (білий список) за замовчуванням
+        self.DEFAULT_WHITE_WORDS = [
+            # Географія та назви
+            "херсон", "херсонець", "херсонський", "херсонщина",
+            
+            # Предмети, фрукти та UA/RU слова
+            "команда", "командна", "командир", "мандарин", "мандат", "мандариновий",
+            "гірлянда", "пропаганда", "еманципація", "саламандра", "панда", "контрабанда",
+            "лаванда", "веранда", "фанда", "дистанція", "інстанція",
+            "підозр", "підозрювати", "підозра", "підозрілий", "підозрюваний",
+            "пізніше", "пізній", "пізно", "підошва", "підодіяльник", "підпис",
+            "сукати", "сукуватий", "сукулент", "засукати", "підсукати", "борсука",
+            "сатира", "сатир", "сатиричний", "сатисфакція",
+            "писати", "написати", "описати", "підписати", "переписати", "дописати",
+            "художник", "художній", "худий", "худнути", "худіти", "хустка", "хутро",
+            "дупло", "дуплет", "дуплекс", "індустрія",
+            "педикюр", "курватура", "херувим", "херес",
+            "шабля", "ансамбля", "фагот", "дебати", "ребата",
+            
+            # Англійські слова (через агресивну нормалізацію 'ass', 'cock', 'dick' тощо)
+            "associate", "association", "assist", "assistance", "assistant",
+            "assembly", "assign", "assignment", "assume", "assumption", 
+            "assurance", "assure", "assert", "assertion", "assets", "assessment",
+            "massage", "passive", "classic", "glass", "grass", "massive", "brass",
+            "chess", "dress", "press", "address", "pass", "passion",
+            "cocktail", "peacock", "cockroach", "cockney",
+            "dickens", "dictator", "dictionary", "dictation", "predict", "verdict",
+            "addict", "addiction", "contradict",
+            "title", "titan", "titanic", "titrate", "attitude", "entity", "identity",
+            "constitute", "institution", "substitute",
+            "cucumber", "cumulative", "succumb", "accumulate",
+            "shell", "hello", "jellyfish", "epistle",
+            
+            # Кирилличні варіанти англійських запозичень
+            "асоціація", "асистент", "асамблея", "асортимент", "асорті",
+            "коктейль", "диктор", "диктант", "диктатура", "пасивний", "класика",
+            "адреса", "пасія", "преса", "прогрес", "конгрес",
+        ]
+
         # Кеш заборонених слів і виключених каналів (інвалідується при змінах)
         self._word_cache = {}       # {guild_id: [words]}
         self._excluded_cache = {}   # {guild_id: {channel_ids}}
@@ -205,9 +244,11 @@ class AutoMod(commands.Cog):
             (guild_id,)
         ) as cursor:
             rows = await cursor.fetchall()
-        words = [r[0] for r in rows]
-        self._white_cache[guild_id] = words
-        return words
+        db_words = [r[0] for r in rows]
+        # Об'єднуємо дефолтні слова з тими, що в БД
+        combined = list(set(self.DEFAULT_WHITE_WORDS + db_words))
+        self._white_cache[guild_id] = combined
+        return combined
 
     async def is_excluded_channel(self, channel_id, guild_id):
         """Перевіряє чи виключений канал з фільтру."""
@@ -304,21 +345,32 @@ class AutoMod(commands.Cog):
                     
                     is_whitelisted = False
                     for wv in word_variants:
-                        if wv in white_words:
+                        # Перевірка на повний збіг або якщо біле слово є ПРІФІКСОМ (наприклад 'херсон' для 'херсонський')
+                        if any(wv == ww or wv.startswith(ww) for ww in white_words):
                             is_whitelisted = True
                             break
                     if is_whitelisted:
                         continue
 
-                    for orig_word, ban_norms in banned_norms:
+                    for orig_word, ban_variants in banned_norms:
                         if orig_word in found_words:
                             continue
-                        for wn in ban_norms:
+                        for wn in ban_variants:
                             for wv in word_variants:
-                                # Слово збігається якщо воно дорівнює або є ПОЧАТКОМ слова
-                                # ("єбан" → "єбаний" ✅, але "сати" ≠ початок "писати" ✅)
-                                if wv == wn or wv.startswith(wn):
+                                # М'яка логіка:
+                                # Якщо корінь мату дуже короткий (≤3 симвови), вимагаємо ПОВНОГО збігу.
+                                # Це захистить від "херсон" (корінь "хер"), "команда" (корінь "манда")
+                                if len(wn) <= 3:
+                                    is_match = (wv == wn)
+                                else:
+                                    # Для довших коренів залишаємо startswith (напр. "пізд" -> "піздець")
+                                    is_match = (wv == wn or wv.startswith(wn))
+
+                                if is_match:
                                     found_words.append(orig_word)
+                                    break
+                            if orig_word in found_words:
+                                break
 
                 if found_words:
                     original_content = message.content
@@ -357,12 +409,20 @@ class AutoMod(commands.Cog):
                         if is_white:
                             is_bad = False
                         else:
-                            is_bad = any(
-                                mv == wn or mv.startswith(wn)
-                                for _, word_norms in banned_norms
-                                for wn in word_norms
-                                for mv in token_norms
-                            )
+                            is_bad = False
+                            for _, norms_list in banned_norms:
+                                for wn in norms_list:
+                                    for mv in token_norms:
+                                        if len(wn) <= 3:
+                                            match = (mv == wn)
+                                        else:
+                                            match = (mv == wn or mv.startswith(wn))
+                                        
+                                        if match:
+                                            is_bad = True
+                                            break
+                                    if is_bad: break
+                                if is_bad: break
 
                         if is_bad:
                             # Замінюємо тільки буквену частину зірочками
