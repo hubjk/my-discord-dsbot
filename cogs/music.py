@@ -9,6 +9,10 @@ import re
 # Suppress noise about console usage from errors
 youtube_dl.utils.bug_reports_message = lambda **kwargs: ''
 
+import os
+
+COOKIES_FILE = 'cookies.txt'
+
 ytdl_format_options = {
     'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -22,6 +26,12 @@ ytdl_format_options = {
     'default_search': 'ytsearch1', # Take first search result by default
     'source_address': '0.0.0.0'
 }
+
+if os.path.exists(COOKIES_FILE):
+    print(f"[Music] Знайдено cookies.txt, використовуємо для yt-dlp")
+    ytdl_format_options['cookiefile'] = COOKIES_FILE
+else:
+    print(f"[Music] cookies.txt не знайдено, YouTube може блокувати запити")
 
 # Fast extractor that doesn't resolve video streams (perfect for fetching playlists instantly)
 fast_ytdl_options = ytdl_format_options.copy()
