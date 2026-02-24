@@ -1,270 +1,251 @@
 import discord
 from discord.ext import commands
-import yt_dlp as youtube_dl
+import yt_dlp
 import asyncio
 import urllib.request
 import json
-import re
 
-# Suppress noise about console usage from errors
-youtube_dl.utils.bug_reports_message = lambda **kwargs: ''
+# Завантаження opus
+if not discord.opus.is_loaded():
+    import ctypes.util
+    opus_path = ctypes.util.find_library('opus')
+    if opus_path:
+        discord.opus.load_opus(opus_path)
+        print(f"[Music] ✅ Opus завантажено: {opus_path}")
+    else:
+        print("[Music] ⚠️ libopus не знайдено!")
 
-ytdl_format_options = {
-    'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': False, # Changed to False for playlist support
+yt_dlp.utils.bug_reports_message = lambda **kwargs: ''
+
+ytdl_opts = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
     'nocheckcertificate': True,
-    'ignoreerrors': True, # Ignore unavailable videos
-    'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'ytsearch1', # Take first search result by default
-    'source_address': '0.0.0.0'
+    'default_search': 'ytsearch1',
+    'source_address': '0.0.0.0',
 }
 
-# Fast extractor that doesn't resolve video streams (perfect for fetching playlists instantly)
-fast_ytdl_options = ytdl_format_options.copy()
-fast_ytdl_options['extract_flat'] = True
-fast_ytdl = youtube_dl.YoutubeDL(fast_ytdl_options)
+# Для плейлистів — швидкий режим без витягування стрімів
+playlist_opts = ytdl_opts.copy()
+playlist_opts['extract_flat'] = True
+playlist_opts['noplaylist'] = False
 
-ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
+ffmpeg_opts = {
+    'before_options': '-nostdin -loglevel quiet -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn',
 }
 
-ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
+ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+playlist_ytdl = yt_dlp.YoutubeDL(playlist_opts)
 
-class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get('title')
-        self.url = data.get('url')
-
-    @classmethod
-    async def from_url(cls, url: str, *, loop=None, stream=False) -> "YTDLSource":
-        loop = loop or asyncio.get_event_loop()
-        print(f"[Music] Extracting info for URL: {url}")
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-
-        if data is None:
-            raise ValueError(f"yt-dlp returned None for URL: {url}")
-
-        if 'entries' in data:
-            data = data['entries'][0]
-
-        if data is None:
-            raise ValueError("First entry in playlist is None")
-
-        stream_url = data.get('url')
-        if not stream_url:
-            raise ValueError(f"No stream URL found in extracted data. Keys: {list(data.keys())}")
-
-        print(f"[Music] Playing stream URL: {stream_url[:80]}...")
-        filename = stream_url if stream else ytdl.prepare_filename(data)
-        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
 def get_spotify_title(url):
+    """Отримує назву треку зі Spotify через oEmbed."""
     try:
-        req = urllib.request.Request(f"https://open.spotify.com/oembed?url={url}", headers={'User-Agent': 'Mozilla/5.0'})
+        req = urllib.request.Request(
+            f"https://open.spotify.com/oembed?url={url}",
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
         response = urllib.request.urlopen(req, timeout=3)
         data = json.loads(response.read())
-        title = data.get('title')
-        if title:
-            return title
-    except Exception as e:
-        print(f"[Music] Spotify oEmbed error: {e}")
-    return None
+        return data.get('title')
+    except Exception:
+        return None
 
 
 class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Format: {guild_id: [{'title': title, 'url': url}, ...]}
-        self.queues: dict[int, list[dict]] = {}
-        # History: {guild_id: [(title, url), ...]} — last 20 songs
-        self.history: dict[int, list[tuple[str, str]]] = {}
+        self.queues: dict[int, list[dict]] = {}      # {guild_id: [{'title': ..., 'url': ...}]}
+        self.history: dict[int, list[tuple]] = {}     # {guild_id: [(title, url), ...]}
+        self._play_lock: dict[int, asyncio.Lock] = {} # Запобігає подвійному програванню
+
+    def _lock(self, guild_id: int) -> asyncio.Lock:
+        if guild_id not in self._play_lock:
+            self._play_lock[guild_id] = asyncio.Lock()
+        return self._play_lock[guild_id]
+
+    async def _extract_stream(self, url: str) -> tuple[str, str]:
+        """Витягує стрім-URL та назву треку. Повертає (stream_url, title)."""
+        data = await self.bot.loop.run_in_executor(
+            None, lambda: ytdl.extract_info(url, download=False)
+        )
+        if not data:
+            raise Exception("yt-dlp повернув порожній результат")
+        if 'entries' in data:
+            data = data['entries'][0]
+        return data['url'], data.get('title', 'Невідомий трек')
 
     async def play_next(self, ctx):
-        if ctx.guild.id in self.queues and len(self.queues[ctx.guild.id]) > 0:
-            # Get the next song dict
-            next_song = self.queues[ctx.guild.id].pop(0)
+        """Бере наступний трек з черги та програє. Якщо черга пуста — нічого не робить."""
+        gid = ctx.guild.id
+
+        async with self._lock(gid):
+            if not ctx.voice_client or not ctx.voice_client.is_connected():
+                return
+
+            queue = self.queues.get(gid, [])
+            if not queue:
+                return
+
+            song = queue.pop(0)
 
             try:
-                # Extract Stream URL right before playing so it doesn't expire
-                player = await YTDLSource.from_url(next_song['url'], loop=self.bot.loop, stream=True)
+                stream_url, extracted_title = await self._extract_stream(song['url'])
             except Exception as e:
-                await ctx.send(f"❌ Не вдалося відтворити **{next_song['title']}** (переходимо до наступної).")
-                # Resume play loop safely
-                fut = asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
-                try: fut.result()
-                except: pass
+                await ctx.send(f"❌ Не вдалося відтворити **{song['title']}**, пропускаю.")
+                print(f"[Music] Extract error: {e}")
+                self.bot.loop.create_task(self.play_next(ctx))
                 return
-            
-            # Start playing
-            def after_playing(error):
-                fut = asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
-                try: fut.result()
-                except: pass
 
-            # Save to history
-            gid = ctx.guild.id
-            if gid not in self.history:
-                self.history[gid] = []
-            self.history[gid].append((player.title, player.data.get('webpage_url', player.url)))
-            if len(self.history[gid]) > 20:
-                self.history[gid].pop(0)
+            # Використовуємо назву з черги (вона правильна), а не з повторного витягування
+            title = song['title'] if song['title'] != 'Невідомий трек' else extracted_title
 
-            ctx.voice_client.play(player, after=after_playing)
-            await ctx.send(f'🎶 Тепер грає: **{player.title}**')
-        else:
-            # Queue is empty
-            pass
+            source = discord.FFmpegPCMAudio(stream_url, **ffmpeg_opts)
+            player = discord.PCMVolumeTransformer(source, volume=0.5)
 
-    @commands.command(name="join", aliases=["зайти"], help="Доєднати бота до вашого голосового каналу")
+            # Зберігаємо в історію
+            hist = self.history.setdefault(gid, [])
+            hist.append((title, song['url']))
+            if len(hist) > 20:
+                hist.pop(0)
+
+            def after(error):
+                if error:
+                    print(f'[Music] Playback error: {error}')
+                asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
+
+            ctx.voice_client.play(player, after=after)
+            await ctx.send(f'🎶 Грає: **{title}**')
+
+    # ─── Команди ────────────────────────────────────────────
+
+    @commands.command(name="join", aliases=["зайти"], help="Приєднати бота до голосового каналу")
     async def join(self, ctx):
-        if not ctx.message.author.voice:
-            await ctx.send("❌ Ви не підключені до жодного голосового каналу!")
+        if not ctx.author.voice:
+            await ctx.send("❌ Ви не в голосовому каналі!")
             return False
-        
-        channel = ctx.message.author.voice.channel
-        if ctx.voice_client is not None:
-            return await ctx.voice_client.move_to(channel)
-        
-        await channel.connect()
+        channel = ctx.author.voice.channel
+        if ctx.voice_client:
+            await ctx.voice_client.move_to(channel)
+        else:
+            await channel.connect()
         return True
 
-    @commands.command(name="play", aliases=["p", "грати"], help="Відтворити пісню з YouTube. Приклад: !play <посилання_або_назва>")
+    @commands.command(name="play", aliases=["p", "грати"], help="Відтворити пісню: !play <посилання або назва>")
     async def play(self, ctx, *, query):
         if not ctx.voice_client:
-            success = await ctx.invoke(self.join)
-            if not success:
+            if not await ctx.invoke(self.join):
                 return
 
         async with ctx.typing():
-            # Check for Spotify links
+            # Spotify → пошук на YouTube
             if "open.spotify.com/track" in query:
-                sp_title = await self.bot.loop.run_in_executor(None, get_spotify_title, query)
-                if sp_title:
-                    query = f"ytsearch:{sp_title}"
+                title = await self.bot.loop.run_in_executor(None, get_spotify_title, query)
+                if title:
+                    query = f"ytsearch:{title}"
                 else:
-                    await ctx.send("❌ Не вдалося розпізнати трек зі Spotify.")
-                    return
+                    return await ctx.send("❌ Не вдалося розпізнати трек зі Spotify.")
 
+            # Визначаємо: плейлист чи один трек
+            is_playlist = "list=" in query
             try:
-                # Add YouTube search prefix if the query is not a direct URL
-                if not query.startswith("http://") and not query.startswith("https://"):
-                    search_query = f"ytsearch:{query}"
+                if is_playlist:
+                    data = await self.bot.loop.run_in_executor(
+                        None, lambda: playlist_ytdl.extract_info(query, download=False)
+                    )
                 else:
-                    search_query = query
-
-                # Fast extraction (returns flat dictionaries, resolves playlists beautifully without extracting HD stream URLs)
-                data = await self.bot.loop.run_in_executor(None, lambda: fast_ytdl.extract_info(search_query, download=False))
+                    data = await self.bot.loop.run_in_executor(
+                        None, lambda: ytdl.extract_info(query, download=False)
+                    )
             except Exception as e:
-                await ctx.send(f"❌ Помилка пошуку: ```{e}```")
-                return
+                return await ctx.send(f"❌ Помилка пошуку: ```{e}```")
 
             if not data:
-                await ctx.send("❌ Нічого не знайдено.")
-                return
+                return await ctx.send("❌ Нічого не знайдено.")
 
-            # Determine if it's a playlist or a single result
+            # Збираємо список треків
             if 'entries' in data:
-                # If the fallback default returned a playlist, take it all!
-                entries = list(data['entries'])
+                entries = [e for e in data['entries'] if e]
                 if data.get('extractor_key') == 'YoutubeSearch':
-                    entries = entries[:1] # Take only the first result of a manual query
+                    entries = entries[:1]
             else:
                 entries = [data]
 
-            entries = [e for e in entries if e] # ignore None
             if not entries:
-                await ctx.send("❌ Нічого не знайдено або плейліст пустий/приватний.")
-                return
+                return await ctx.send("❌ Нічого не знайдено або плейлист порожній.")
 
-            if ctx.guild.id not in self.queues:
-                self.queues[ctx.guild.id] = []
+            gid = ctx.guild.id
+            queue = self.queues.setdefault(gid, [])
 
             for entry in entries:
-                # In extract_flat mode, 'webpage_url' is the real YouTube video page URL.
-                # We must store it so that YTDLSource.from_url can resolve the actual audio stream later.
-                # The 'url' from flat mode may be an expired/invalid direct stream — do NOT use it.
-                url_to_play = entry.get('webpage_url') or entry.get('url') or query
-                if not url_to_play.startswith("http"):
+                url = entry.get('url') or entry.get('webpage_url') or query
+                if not str(url).startswith("http"):
                     continue
-
-                title = entry.get('title')
-                if not title or title.lower() == 'videoplayback':
-                    title = 'Unknown Title'
-
-                self.queues[ctx.guild.id].append({'url': url_to_play, 'title': title})
+                queue.append({
+                    'url': url,
+                    'title': entry.get('title', 'Невідомий трек'),
+                })
 
             if len(entries) > 1:
-                await ctx.send(f'🎵 Додано плейліст з **{len(entries)}** треками в чергу!')
+                await ctx.send(f'🎵 Додано **{len(entries)}** треків до черги!')
             elif ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-                await ctx.send(f'🎵 Додано в чергу: **{entries[0].get("title", "Unknown")}** (Місце: {len(self.queues[ctx.guild.id])})')
+                await ctx.send(f'🎵 Додано в чергу: **{entries[0].get("title", "?")}** (#{len(queue)})')
 
-            # If the bot is not doing anything, tell it to start playing the queue
+            # Якщо зараз нічого не грає — стартуємо
             if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
                 await self.play_next(ctx)
-
-    @commands.command(name="queue", aliases=["q", "черга"], help="Показати чергу пісень")
-    async def queue(self, ctx):
-        if ctx.guild.id in self.queues and len(self.queues[ctx.guild.id]) > 0:
-            queue_list = "\n".join([f"{i+1}. {song['title']}" for i, song in enumerate(self.queues[ctx.guild.id][:20])])
-            if len(self.queues[ctx.guild.id]) > 20:
-                queue_list += f"\n\n*...і ще {len(self.queues[ctx.guild.id]) - 20} треків.*"
-            embed = discord.Embed(title="🎵 Черга відтворення", description=queue_list, color=discord.Color.blue())
-            await ctx.send(embed=embed)
-        else:
-            await ctx.send("Черга порожня.")
-
-    @commands.command(name="clearqueue", aliases=["cq", "очистити_чергу", "cqueue"], help="Очистити чергу пісень")
-    async def clearqueue(self, ctx):
-        if ctx.guild.id in self.queues and self.queues[ctx.guild.id]:
-            self.queues[ctx.guild.id].clear()
-            await ctx.send("🧹 Чергу успішно очищено!")
-        else:
-            await ctx.send("Черга і так порожня.")
 
     @commands.command(name="skip", aliases=["s", "пропустити"], help="Пропустити поточну пісню")
     async def skip(self, ctx):
         if ctx.voice_client and ctx.voice_client.is_playing():
-            ctx.voice_client.stop() # This triggers the `after` callback which calls `play_next`
-            await ctx.send("⏭️ Пісню пропущено!")
+            ctx.voice_client.stop()  # Викликає after → play_next
+            await ctx.send("⏭️ Пропущено!")
         else:
             await ctx.send("Зараз нічого не грає.")
 
-    @commands.command(name="stop", aliases=["leave", "зупинити", "вийти"], help="Зупинити музику та вийти з каналу")
-    async def stop(self, ctx):
-        if ctx.voice_client:
-            # Clear queue
-            if ctx.guild.id in self.queues:
-                self.queues[ctx.guild.id].clear()
-            
-            await ctx.voice_client.disconnect()
-            await ctx.send("🛑 Відтворення зупинено, я вийшов з каналу.")
-        else:
-            await ctx.send("Я не знаходжуся в голосовому каналі.")
-
-    @commands.command(name="pause", aliases=["пауза"], help="Поставити музику на паузу")
+    @commands.command(name="pause", aliases=["пауза"], help="Поставити на паузу")
     async def pause(self, ctx):
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.pause()
-            await ctx.send("⏸️ Музика на паузі.")
+            await ctx.send("⏸️ Пауза.")
 
-    @commands.command(name="history", aliases=["his", "історія"], help="Показати останні 20 пісень. Додати номери щоб включити: !his 1,3")
-    async def history(self, ctx, *, selection: str = ""):
+    @commands.command(name="resume", aliases=["продовжити"], help="Продовжити відтворення")
+    async def resume(self, ctx):
+        if ctx.voice_client and ctx.voice_client.is_paused():
+            ctx.voice_client.resume()
+            await ctx.send("▶️ Продовжено.")
+
+    @commands.command(name="queue", aliases=["q", "черга"], help="Показати чергу")
+    async def queue(self, ctx):
+        gid = ctx.guild.id
+        queue = self.queues.get(gid, [])
+        if not queue:
+            return await ctx.send("Черга порожня.")
+
+        lines = [f"`{i+1}.` {s['title']}" for i, s in enumerate(queue[:20])]
+        if len(queue) > 20:
+            lines.append(f"\n*...і ще {len(queue) - 20} треків.*")
+
+        embed = discord.Embed(title="🎵 Черга", description="\n".join(lines), color=discord.Color.blue())
+        await ctx.send(embed=embed)
+
+    @commands.command(name="history", aliases=["his", "історія"], help="Останні 20 пісень. Додати: !his 1,3")
+    async def history_cmd(self, ctx, *, selection: str = ""):
         gid = ctx.guild.id
         hist = self.history.get(gid, [])
-        
-        if not hist:
-            await ctx.send("📏 Історія пуста. Спочатку відтворіть якусь пісню через `!play`.")
-            return
 
-        # If user gave a selection like "1,3,5" — re-add those songs to queue
+        if not hist:
+            return await ctx.send("📜 Історія порожня.")
+
+        # Вибрати конкретні пісні з історії → додати в чергу
         if selection:
+            if not ctx.voice_client:
+                if not await ctx.invoke(self.join):
+                    return
+
             indices = []
             for part in selection.split(','):
                 try:
@@ -275,55 +256,51 @@ class Music(commands.Cog):
                     pass
 
             if not indices:
-                await ctx.send("❌ Невірний вибір. Введіть номери через кому: `!his 1,3`")
-                return
+                return await ctx.send("❌ Невірний вибір. Приклад: `!his 1,3`")
 
-            if not ctx.voice_client:
-                success = await ctx.invoke(self.join)
-                if not success:
-                    return
-
+            queue = self.queues.setdefault(gid, [])
             added = []
+            reversed_hist = list(reversed(hist))
             for idx in indices:
-                title, url = hist[idx]
-                try:
-                    async with ctx.typing():
-                        player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
-                    if ctx.guild.id not in self.queues:
-                        self.queues[ctx.guild.id] = []
-                    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-                        self.queues[ctx.guild.id].append(player)
-                        added.append(f"🎵 {player.title} → Додано в чергу")
-                    else:
-                        def after_playing_h(error):
-                            fut = asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
-                            try: fut.result()
-                            except: pass
-                        ctx.voice_client.play(player, after=after_playing_h)
-                        added.append(f"🎶 {player.title} → Розпочато відтворення")
-                except Exception as e:
-                    added.append(f"❌ {title} → Помилка: {e}")
+                title, url = reversed_hist[idx]
+                queue.append({'url': url, 'title': title})
+                added.append(f"🎵 {title}")
 
-            await ctx.send("\n".join(added))
+            await ctx.send("Додано:\n" + "\n".join(added))
+
+            if ctx.voice_client and not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                await self.play_next(ctx)
             return
 
-        # No selection — show history list
-        lines = []
-        for i, (title, _) in enumerate(reversed(hist), 1):
-            lines.append(f"`{i}.` {title}")
+        # Показати список
+        lines = [f"`{i+1}.` {title}" for i, (title, _) in enumerate(reversed(hist))]
         embed = discord.Embed(
-            title="📜 Останні 20 пісень",
+            title="📜 Останні пісні",
             description="\n".join(lines),
             color=discord.Color.purple()
         )
-        embed.set_footer(text="Щоб додати пісню, напишіть: !his 1 | Кілька одразу: !his 1,3,5")
+        embed.set_footer(text="Додати: !his 1 | Кілька: !his 1,3,5")
         await ctx.send(embed=embed)
 
-    @commands.command(name="resume", aliases=["продовжити"], help="Продовжити відтворення музики")
-    async def resume(self, ctx):
-        if ctx.voice_client and ctx.voice_client.is_paused():
-            ctx.voice_client.resume()
-            await ctx.send("▶️ Відтворення продовжено.")
+    @commands.command(name="cq", aliases=["очерга"], help="Очистити чергу (поточний трек продовжить грати)")
+    async def clear_queue(self, ctx):
+        gid = ctx.guild.id
+        if gid in self.queues and self.queues[gid]:
+            count = len(self.queues[gid])
+            self.queues[gid].clear()
+            await ctx.send(f"🗑️ Чергу очищено! Видалено **{count}** треків.")
+        else:
+            await ctx.send("Черга вже порожня.")
+
+    @commands.command(name="stop", aliases=["leave", "зупинити", "вийти"], help="Зупинити і вийти з каналу")
+    async def stop(self, ctx):
+        if not ctx.voice_client:
+            return await ctx.send("Я не в голосовому каналі.")
+        if ctx.guild.id in self.queues:
+            self.queues[ctx.guild.id].clear()
+        await ctx.voice_client.disconnect()
+        await ctx.send("🛑 Зупинено, вийшов з каналу.")
+
 
 async def setup(bot):
     await bot.add_cog(Music(bot))

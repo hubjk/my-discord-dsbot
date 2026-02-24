@@ -68,8 +68,7 @@ class AutoMod(commands.Cog):
             "курва", "kurva",
 
             # === ССАТИ ===
-            "ссати", "ссань", "ссань",
-            "ssaty",
+            "ссати", "ссань", "ssaty",
 
             # === ЛАЙНО / ГІВНО ===
             "лайно", "гівно", "гiвно", "гiвнюк",
@@ -229,19 +228,32 @@ class AutoMod(commands.Cog):
         is_admin = message.author.guild_permissions.administrator or message.guild.owner_id == message.author.id
         gid = message.guild.id
 
-        # 1. АНТИ-ЛІНК (Заборона посилань) — не для адмінів
+        # 1. АНТИ-ЛІНК (Заборона посилань) — не для адмінів та учасників з рівнем 2+
         if not is_admin and self.link_regex.search(message.content):
-            await message.delete()
-            warning = await message.channel.send(f"⚠️ {message.author.mention}, на цьому сервері **заборонено** надсилати посилання!")
-            await warning.delete(delay=5)
-            audit_cog = self.bot.get_cog("Audit")
-            if audit_cog:
-                channel = await audit_cog.get_audit_channel(message.guild)
-                if channel:
-                    embed = discord.Embed(title="🔗 Знайдено посилання", description=f"{message.author.mention} намагався надіслати посилання в {message.channel.mention}", color=discord.Color.red())
-                    embed.add_field(name="Вміст", value=message.content[:500])
-                    await channel.send(embed=embed)
-            return
+            # Перевіряємо рівень користувача
+            allow_links = False
+            levels_cog = self.bot.get_cog("Levels")
+            if levels_cog:
+                try:
+                    xp = await levels_cog.get_user_xp(message.author.id, gid)
+                    level = levels_cog.calculate_level(xp)
+                    if level >= 2:
+                        allow_links = True
+                except Exception:
+                    pass
+
+            if not allow_links:
+                await message.delete()
+                warning = await message.channel.send(f"⚠️ {message.author.mention}, надсилати посилання можуть лише учасники з **2 рівня** і вище!")
+                await warning.delete(delay=5)
+                audit_cog = self.bot.get_cog("Audit")
+                if audit_cog:
+                    channel = await audit_cog.get_audit_channel(message.guild)
+                    if channel:
+                        embed = discord.Embed(title="🔗 Знайдено посилання", description=f"{message.author.mention} намагався надіслати посилання в {message.channel.mention}", color=discord.Color.red())
+                        embed.add_field(name="Вміст", value=message.content[:500])
+                        await channel.send(embed=embed)
+                return
 
         # 2. ФІЛЬТР МАТУ (Заблоковані слова)
         # Пропускаємо виключені канали
@@ -252,15 +264,33 @@ class AutoMod(commands.Cog):
             try:
                 banned_words = await self.get_banned_words(gid)
                 
-                # Вилучаємо посилання з перевірки першого проходу, щоб випадкові букви в URL не розпізнавались як мат
+                # Вилучаємо посилання з перевірки, щоб випадкові букви в URL не розпізнавались як мат
                 text_without_urls = re.sub(r'https?://\S+', '', message.content)
-                msg_variants = self.normalize_text(text_without_urls)
-
-                # Знаходимо ВСІ заборонені слова в повідомленні
+                
+                # Розбиваємо на окремі слова та перевіряємо КОЖНЕ окремо (щоб "писати" не збігалось з "ссати")
+                message_words = re.split(r'\s+', text_without_urls.strip())
+                
+                banned_norms = self.get_banned_norms(banned_words)
                 found_words = []
-                for orig_word, word_norms in self.get_banned_norms(banned_words):
-                    if any(wn in mv for wn in word_norms for mv in msg_variants):
-                        found_words.append(orig_word)
+                
+                for msg_word in message_words:
+                    if not msg_word or re.match(r'^https?://', msg_word):
+                        continue
+                    # Прибираємо пунктуацію з країв слова
+                    stripped = re.sub(r'^[^\w\u0400-\u04ff]+|[^\w\u0400-\u04ff]+$', '', msg_word)
+                    if not stripped:
+                        continue
+                    word_variants = self.normalize_text(stripped)
+                    
+                    for orig_word, ban_norms in banned_norms:
+                        if orig_word in found_words:
+                            continue
+                        for wn in ban_norms:
+                            for wv in word_variants:
+                                # Слово збігається якщо воно дорівнює або є ПОЧАТКОМ слова
+                                # ("єбан" → "єбаний" ✅, але "сати" ≠ початок "писати" ✅)
+                                if wv == wn or wv.startswith(wn):
+                                    found_words.append(orig_word)
 
                 if found_words:
                     original_content = message.content
@@ -293,7 +323,7 @@ class AutoMod(commands.Cog):
                             continue
                         token_norms = self.normalize_text(stripped)
                         is_bad = any(
-                            wn in mv
+                            mv == wn or mv.startswith(wn)
                             for _, word_norms in self.get_banned_norms(banned_words)
                             for wn in word_norms
                             for mv in token_norms
