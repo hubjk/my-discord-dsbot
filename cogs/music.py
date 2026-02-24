@@ -141,8 +141,14 @@ class Music(commands.Cog):
                     return
 
             try:
+                # Add YouTube search prefix if the query is not a direct URL
+                if not query.startswith("http://") and not query.startswith("https://"):
+                    search_query = f"ytsearch:{query}"
+                else:
+                    search_query = query
+
                 # Fast extraction (returns flat dictionaries, resolves playlists beautifully without extracting HD stream URLs)
-                data = await self.bot.loop.run_in_executor(None, lambda: fast_ytdl.extract_info(query, download=False))
+                data = await self.bot.loop.run_in_executor(None, lambda: fast_ytdl.extract_info(search_query, download=False))
             except Exception as e:
                 await ctx.send(f"❌ Помилка пошуку: ```{e}```")
                 return
