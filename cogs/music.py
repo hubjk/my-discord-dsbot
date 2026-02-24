@@ -83,8 +83,7 @@ class Music(commands.Cog):
                 # Extract Stream URL right before playing so it doesn't expire
                 player = await YTDLSource.from_url(next_song['url'], loop=self.bot.loop, stream=True)
             except Exception as e:
-                await ctx.send(f"❌ Не вдалося відтворити **{next_song['title']}** (переходимо до наступної).\nПомилка: `{e}`")
-                print(f"[Music] Playback Error for {next_song['url']}: {e}")
+                await ctx.send(f"❌ Не вдалося відтворити **{next_song['title']}** (переходимо до наступної).")
                 # Resume play loop safely
                 fut = asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
                 try: fut.result()
@@ -195,6 +194,14 @@ class Music(commands.Cog):
             await ctx.send(embed=embed)
         else:
             await ctx.send("Черга порожня.")
+
+    @commands.command(name="clearqueue", aliases=["cq", "очистити_чергу", "cqueue"], help="Очистити чергу пісень")
+    async def clearqueue(self, ctx):
+        if ctx.guild.id in self.queues and self.queues[ctx.guild.id]:
+            self.queues[ctx.guild.id].clear()
+            await ctx.send("🧹 Чергу успішно очищено!")
+        else:
+            await ctx.send("Черга і так порожня.")
 
     @commands.command(name="skip", aliases=["s", "пропустити"], help="Пропустити поточну пісню")
     async def skip(self, ctx):

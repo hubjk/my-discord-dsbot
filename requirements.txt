@@ -5,11 +5,11 @@ aiosqlite==0.22.1
 annotated-types==0.7.0
 anyio==4.12.1
 attrs==25.4.0
+audioop-lts==0.2.2
 certifi==2026.1.4
 cffi==2.0.0
 discord.py==2.6.4
 distro==1.9.0
-Flask==3.0.3
 frozenlist==1.8.0
 h11==0.16.0
 httpcore==1.0.9

@@ -3,7 +3,6 @@ from discord.ext import commands
 import os
 import aiosqlite
 from dotenv import load_dotenv
-from keep_alive import keep_alive
 
 # Завантаження змінних оточення з файлу .env
 load_dotenv()
