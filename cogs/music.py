@@ -175,8 +175,8 @@ class Music(commands.Cog):
                 self.queues[ctx.guild.id] = []
 
             for entry in entries:
-                # 'webpage_url' is the original video URL, 'url' might be the direct audio stream
-                url_to_play = entry.get('webpage_url') or entry.get('url') or query
+                # 'url' is the direct audio stream (required for FFmpeg), 'webpage_url' is the video page
+                url_to_play = entry.get('url') or entry.get('webpage_url') or query
                 if not url_to_play.startswith("http"):
                     continue # ytsearch entries might not have an HTTP url initially in flat mode sometimes, but usually they do.
                 
