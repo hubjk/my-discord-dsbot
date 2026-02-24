@@ -175,13 +175,15 @@ class Music(commands.Cog):
                 self.queues[ctx.guild.id] = []
 
             for entry in entries:
-                # 'url' is the direct audio stream (required for FFmpeg), 'webpage_url' is the video page
-                url_to_play = entry.get('url') or entry.get('webpage_url') or query
+                # In extract_flat mode, 'webpage_url' is the real YouTube video page URL.
+                # We must store it so that YTDLSource.from_url can resolve the actual audio stream later.
+                # The 'url' from flat mode may be an expired/invalid direct stream — do NOT use it.
+                url_to_play = entry.get('webpage_url') or entry.get('url') or query
                 if not url_to_play.startswith("http"):
-                    continue # ytsearch entries might not have an HTTP url initially in flat mode sometimes, but usually they do.
-                
+                    continue
+
                 title = entry.get('title')
-                if not title or title == "videoplayback":
+                if not title or title.lower() == 'videoplayback':
                     title = 'Unknown Title'
 
                 self.queues[ctx.guild.id].append({'url': url_to_play, 'title': title})
