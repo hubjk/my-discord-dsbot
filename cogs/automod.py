@@ -148,13 +148,14 @@ class AutoMod(commands.Cog):
             "nigga", "nigger", "niger",
             "faggot", "fag",
             "whore",
-            "retard",
+            "retard", "сосать", "бидло", "херня", "блять", "хер",
 
         ]
 
         # Кеш заборонених слів і виключених каналів (інвалідується при змінах)
         self._word_cache = {}       # {guild_id: [words]}
         self._excluded_cache = {}   # {guild_id: {channel_ids}}
+        self._white_cache = {}       # {guild_id: [words]}
         
     def normalize_text(self, text):
         """Нормалізує текст: повертає два варіанти (4='а' і 4='д') для кращого розпізнавання."""
@@ -194,6 +195,19 @@ class AutoMod(commands.Cog):
         combined = list(set(self.BANNED_WORDS + db_words))
         self._word_cache[guild_id] = combined
         return combined
+
+    async def get_white_words(self, guild_id):
+        """Повертає список білих слів (whitelist) для цього серверу."""
+        if guild_id in self._white_cache:
+            return self._white_cache[guild_id]
+        async with self.bot.db.execute(
+            'SELECT word FROM whitelisted_words WHERE guild_id = ?',
+            (guild_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        words = [r[0] for r in rows]
+        self._white_cache[guild_id] = words
+        return words
 
     async def is_excluded_channel(self, channel_id, guild_id):
         """Перевіряє чи виключений канал з фільтру."""
@@ -271,6 +285,7 @@ class AutoMod(commands.Cog):
                 message_words = re.split(r'\s+', text_without_urls.strip())
                 
                 banned_norms = self.get_banned_norms(banned_words)
+                white_words = await self.get_white_words(gid)
                 found_words = []
                 
                 for msg_word in message_words:
@@ -280,8 +295,21 @@ class AutoMod(commands.Cog):
                     stripped = re.sub(r'^[^\w\u0400-\u04ff]+|[^\w\u0400-\u04ff]+$', '', msg_word)
                     if not stripped:
                         continue
+                    
+                    # Перевірка білого списку
+                    if stripped.lower() in white_words:
+                        continue
+
                     word_variants = self.normalize_text(stripped)
                     
+                    is_whitelisted = False
+                    for wv in word_variants:
+                        if wv in white_words:
+                            is_whitelisted = True
+                            break
+                    if is_whitelisted:
+                        continue
+
                     for orig_word, ban_norms in banned_norms:
                         if orig_word in found_words:
                             continue
@@ -322,12 +350,20 @@ class AutoMod(commands.Cog):
                             words_out.append(token)
                             continue
                         token_norms = self.normalize_text(stripped)
-                        is_bad = any(
-                            mv == wn or mv.startswith(wn)
-                            for _, word_norms in self.get_banned_norms(banned_words)
-                            for wn in word_norms
-                            for mv in token_norms
-                        )
+                        
+                        # Перевірка білого списку для токена
+                        is_white = stripped.lower() in white_words or any(tn in white_words for tn in token_norms)
+                        
+                        if is_white:
+                            is_bad = False
+                        else:
+                            is_bad = any(
+                                mv == wn or mv.startswith(wn)
+                                for _, word_norms in banned_norms
+                                for wn in word_norms
+                                for mv in token_norms
+                            )
+
                         if is_bad:
                             # Замінюємо тільки буквену частину зірочками
                             words_out.append(re.sub(r'\w', '*', token))
@@ -443,6 +479,55 @@ class AutoMod(commands.Cog):
         else:
             words = ", ".join(f"`{r[0]}`" for r in rows)
             await ctx.send(f"📋 Власні заборонені слова цього серверу:\n{words}")
+
+    # ─── Білий список слів (Whitelist) ────────────────────────────────────────
+
+    @commands.group(name="whitelist", aliases=["wl"], invoke_without_command=True)
+    @commands.check(is_only_infaos)
+    async def whitelist(self, ctx):
+        """Управління білим списком слів. Підкоманди: add, remove, list"""
+        await ctx.send("📋 Використання: `!whitelist add <слово>` | `!whitelist remove <слово>` | `!whitelist list`")
+
+    @whitelist.command(name="add")
+    @commands.check(is_only_infaos)
+    async def whitelist_add(self, ctx, *, word: str):
+        word = word.lower().strip()
+        try:
+            await self.bot.db.execute(
+                'INSERT OR IGNORE INTO whitelisted_words (word, guild_id) VALUES (?, ?)',
+                (word, ctx.guild.id)
+            )
+            await self.bot.db.commit()
+            self._white_cache.pop(ctx.guild.id, None)  # Інвалідуємо кеш
+            await ctx.send(f"✅ Слово `{word}` додано до білого списку цього серверу.")
+        except Exception as e:
+            await ctx.send(f"❌ Помилка: {e}")
+
+    @whitelist.command(name="remove", aliases=["del"])
+    @commands.check(is_only_infaos)
+    async def whitelist_remove(self, ctx, *, word: str):
+        word = word.lower().strip()
+        await self.bot.db.execute(
+            'DELETE FROM whitelisted_words WHERE word = ? AND guild_id = ?',
+            (word, ctx.guild.id)
+        )
+        await self.bot.db.commit()
+        self._white_cache.pop(ctx.guild.id, None)
+        await ctx.send(f"✅ Слово `{word}` видалено з білого списку цього серверу (якщо воно було там).")
+
+    @whitelist.command(name="list")
+    @commands.check(is_only_infaos)
+    async def whitelist_list(self, ctx):
+        async with self.bot.db.execute(
+            'SELECT word FROM whitelisted_words WHERE guild_id = ?',
+            (ctx.guild.id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        if not rows:
+            await ctx.send("📋 На цьому сервері немає слів у білому списку.")
+        else:
+            words = ", ".join(f"`{r[0]}`" for r in rows)
+            await ctx.send(f"📋 Білий список слів цього серверу:\n{words}")
 
     # ─── Виключення каналів ───────────────────────────────────────────────────
 

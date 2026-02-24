@@ -93,6 +93,15 @@ class ServerManagementBot(commands.Bot):
             )
         ''')
 
+        # Таблиця білого списку слів (whitelist)
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS whitelisted_words (
+                word TEXT,
+                guild_id INTEGER,
+                PRIMARY KEY (word, guild_id)
+            )
+        ''')
+
         await self.db.commit()
 
         # Автоматичне завантаження всіх cogs (модулів) з папки cogs

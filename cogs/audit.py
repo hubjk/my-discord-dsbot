@@ -49,6 +49,9 @@ class Audit(commands.Cog):
     async def on_message_edit(self, before, after):
         if before.author.bot or before.content == after.content:
             return
+        # Ігноруємо редагування команд бота (починаються з !)
+        if after.content.startswith('!'):
+            return
             
         channel = await self.get_audit_channel(before.guild)
         if not channel:
