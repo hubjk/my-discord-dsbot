@@ -1,0 +1,159 @@
+import discord
+from discord.ext import commands
+import os
+import aiosqlite
+from dotenv import load_dotenv
+
+# Завантаження змінних оточення з файлу .env
+load_dotenv()
+TOKEN = os.getenv("DISCORD_TOKEN")
+PREFIX = os.getenv("COMMAND_PREFIX", "!")
+
+# Налаштування intents (намірів) для отримання подій від Discord
+intents = discord.Intents.default()
+intents.message_content = True # Необхідно для зчитування тексту повідомлень
+intents.members = True         # Необхідно для керування учасниками (модерація)
+# Додаємо наміри для модерації і аудит логів
+intents.moderation = True
+intents.guilds = True
+
+class ServerManagementBot(commands.Bot):
+    def __init__(self):
+        super().__init__(
+            command_prefix=PREFIX,
+            intents=intents,
+        )
+
+    async def setup_hook(self):
+        # Підключення до бази даних SQLite
+        self.db = await aiosqlite.connect('bot.db')
+        
+        # Створення таблиць
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER,
+                guild_id INTEGER,
+                xp INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, guild_id)
+            )
+        ''')
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS warnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                guild_id INTEGER,
+                moderator_id INTEGER,
+                reason TEXT,
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS shop_items (
+                id TEXT,
+                guild_id INTEGER,
+                name TEXT,
+                price INTEGER,
+                role_name TEXT,
+                PRIMARY KEY (id, guild_id)
+            )
+        ''')
+        
+        # Міграція: додаємо колонку balance до таблиці users, якщо її ще немає
+        try:
+            await self.db.execute('ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 0')
+        except Exception:
+            pass
+        # Міграція: кулдауни економіки (зберігаються між перезапусками)
+        try:
+            await self.db.execute('ALTER TABLE users ADD COLUMN last_work INTEGER DEFAULT 0')
+        except Exception:
+            pass
+        try:
+            await self.db.execute('ALTER TABLE users ADD COLUMN last_daily INTEGER DEFAULT 0')
+        except Exception:
+            pass
+
+        # Таблиця заборонених слів (0 = глобальні, guild_id = для конкретного серверу)
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS banned_words (
+                word TEXT,
+                guild_id INTEGER,
+                PRIMARY KEY (word, guild_id)
+            )
+        ''')
+
+        # Таблиця каналів де фільтр вимкнено
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS automod_excluded_channels (
+                channel_id INTEGER,
+                guild_id INTEGER,
+                PRIMARY KEY (channel_id, guild_id)
+            )
+        ''')
+
+        await self.db.commit()
+
+        # Автоматичне завантаження всіх cogs (модулів) з папки cogs
+        if not os.path.exists('./cogs'):
+            os.makedirs('./cogs')
+            
+        for filename in os.listdir('./cogs'):
+            if filename.endswith('.py') and not filename.startswith('__'):
+                try:
+                    await self.load_extension(f'cogs.{filename[:-3]}')
+                    print(f"✅ Завантажено модуль: {filename}")
+                except Exception as e:
+                    print(f"❌ Помилка завантаження {filename}: {e}")
+
+    async def close(self):
+        if hasattr(self, 'db'):
+            await self.db.close()
+            print("💾 Відключено від бази даних.")
+        await super().close()
+
+    async def on_ready(self):
+        print(f'🤖 Увійшли як {self.user} (ID: {self.user.id})')
+        print('-------------------------------------------')
+        # Встановлення статусу бота
+        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="на сервер"))
+
+    # Таблиця: Кирилиця -> Латиниця (QWERTY Ukrainian layout)
+    CYRMAP = str.maketrans({
+        'й':'q','ц':'w','у':'e','к':'r','е':'t','н':'y','г':'u','ш':'i','щ':'o','з':'p',
+        'ф':'a','і':'s','в':'d','а':'f','п':'g','р':'h','о':'j','л':'k','д':'l',
+        'я':'z','ч':'x','с':'c','м':'v','и':'b','т':'n','ь':'m',
+        'Й':'Q','Ц':'W','У':'E','К':'R','Е':'T','Н':'Y','Г':'U','Ш':'I','Щ':'O','З':'P',
+        'Ф':'A','І':'S','В':'D','А':'F','П':'G','Р':'H','О':'J','Л':'K','Д':'L',
+        'Я':'Z','Ч':'X','С':'C','М':'V','И':'B','Т':'N','Ь':'M',
+    })
+
+    async def on_message(self, message):
+        if message.author.bot:
+            await self.process_commands(message)
+            return
+
+        content = message.content
+        # Якщо команда з кириличними символами — транслітеруємо назву команди
+        if content.startswith(PREFIX):
+            after_prefix = content[len(PREFIX):]
+            parts = after_prefix.split(None, 1)
+            if parts:
+                cmd_word = parts[0]
+                if any('\u0400' <= c <= '\u04ff' for c in cmd_word):
+                    latin_cmd = cmd_word.translate(self.CYRMAP)
+                    rest = (' ' + parts[1]) if len(parts) > 1 else ''
+                    new_content = f"{PREFIX}{latin_cmd}{rest}"
+                    # Замінюємо content напряму — discord.py читає message.content
+                    message.content = new_content
+
+        await self.process_commands(message)
+
+bot = ServerManagementBot()
+
+if __name__ == '__main__':
+    if not TOKEN or TOKEN == "your_bot_token_here":
+        print("Помилка: Не знайдено правильний DISCORD_TOKEN. Додайте його в файл .env")
+    else:
+        bot.run(TOKEN)
