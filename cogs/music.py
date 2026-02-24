@@ -45,12 +45,24 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def from_url(cls, url: str, *, loop=None, stream=False) -> "YTDLSource":
         loop = loop or asyncio.get_event_loop()
+        print(f"[Music] Extracting info for URL: {url}")
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-        
+
+        if data is None:
+            raise ValueError(f"yt-dlp returned None for URL: {url}")
+
         if 'entries' in data:
             data = data['entries'][0]
 
-        filename = data['url'] if stream else ytdl.prepare_filename(data)
+        if data is None:
+            raise ValueError("First entry in playlist is None")
+
+        stream_url = data.get('url')
+        if not stream_url:
+            raise ValueError(f"No stream URL found in extracted data. Keys: {list(data.keys())}")
+
+        print(f"[Music] Playing stream URL: {stream_url[:80]}...")
+        filename = stream_url if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
 def get_spotify_title(url):
