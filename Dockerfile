@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 # Встановлюємо ffmpeg (для музики) та інші системні залежності
 RUN apt-get update && \
-    apt-get install -y ffmpeg libffi-dev libnacl-dev python3-dev gcc && \
+    apt-get install -y ffmpeg libopus0 libffi-dev libnacl-dev python3-dev gcc && \
     rm -rf /var/lib/apt/lists/*
 
 # Робоча директорія
