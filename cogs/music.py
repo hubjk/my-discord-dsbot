@@ -944,7 +944,7 @@ class Music(commands.Cog):
         else:
             await ctx.send("ℹ️ Всі ваші треки вже в сьогоднішній черзі.", delete_after=10)
 
-    @commands.command(name="playcontinue", aliases=["playc", "pc", "продовжити"], help="Відновити останню сесію (канал, пісню та час)")
+    @commands.command(name="playcontinue", aliases=["playc", "pc", "відновити"], help="Відновити останню сесію (канал, пісню та час)")
     async def play_continue(self, ctx):
         try:
             await ctx.message.delete(delay=10)
