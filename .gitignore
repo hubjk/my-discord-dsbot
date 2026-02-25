@@ -17,5 +17,6 @@ env/
 
 # Бази даних
 bot.db
+database.db
 *.db
 *.sqlite3
