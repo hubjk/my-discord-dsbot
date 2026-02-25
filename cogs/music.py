@@ -34,8 +34,9 @@ playlist_opts['extract_flat'] = True
 playlist_opts['noplaylist'] = False
 
 ffmpeg_opts = {
-    'before_options': '-nostdin -loglevel quiet -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -analyzeduration 0 -probesize 32768',
-    'options': '-vn',
+    # Обмеження на використання ресурсів: 1 потік, відключення агресивного реконекту, який викликає 100% CPU loop
+    'before_options': '-nostdin -loglevel quiet -threads 1 -reconnect 1 -reconnect_at_eof 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32768',
+    'options': '-vn -threads 1',
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_opts)

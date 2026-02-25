@@ -649,6 +649,10 @@ class Stats(commands.Cog):
     async def check_afk_task(self):
         """Перевіряє ліміти перебування в голосі (Anti-AFK)."""
         now = datetime.now()
+        
+        # Кешуємо налаштування для серверів на цей цикл, щоб не спамити БД
+        guild_settings = {}
+        
         for key in list(self.voice_sessions.keys()):
             user_id, guild_id = key
             guild = self.bot.get_guild(guild_id)
@@ -659,6 +663,14 @@ class Stats(commands.Cog):
                 self.voice_sessions.pop(key, None)
                 self.afk_start_times.pop(key, None)
                 continue
+                
+            # Завантажуємо налаштування один раз для сервера
+            if guild_id not in guild_settings:
+                xp_en = await self.get_setting(guild_id, "voice_xp_enabled", 1)
+                afk_en = await self.get_setting(guild_id, "anti_afk_enabled", 1)
+                guild_settings[guild_id] = (xp_en, afk_en)
+            
+            xp_enabled, anti_afk_enabled = guild_settings[guild_id]
             
             # 1. Періодичне збереження часу в БД (щохвилини)
             last_save = self.last_voice_update.get(key)
@@ -670,7 +682,6 @@ class Stats(commands.Cog):
                     await self.save_voice_session(user_id, guild_id, member.voice.channel.id, self.voice_sessions[key], duration_override=delta)
 
             # 2. Періодичне нарахування XP (кожні 5 хв)
-            xp_enabled = await self.get_setting(guild_id, "voice_xp_enabled", 1)
             if xp_enabled:
                 duration = int((now - self.voice_sessions[key]).total_seconds())
                 total_blocks = duration // 300
@@ -684,7 +695,6 @@ class Stats(commands.Cog):
                         await levels_cog.add_xp(user_id, guild_id, xp_to_add, None)
 
             # 3. Перевіряємо чи ввімкнено Anti-AFK на сервері
-            anti_afk_enabled = await self.get_setting(guild_id, "anti_afk_enabled", 1)
             if not anti_afk_enabled: continue
             
             channel = member.voice.channel
