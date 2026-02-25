@@ -278,7 +278,9 @@ class Stats(commands.Cog):
     async def get_total_voice_time(self, user_id, guild_id):
         async with self.bot.db.execute('SELECT time_total FROM voice_activity_stats WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
             res = await cursor.fetchone()
-            return res[0] or 0
+            if res:
+                return res[0] or 0
+            return 0
 
     async def get_text_words(self, user_id, guild_id, column="words_total"):
         # Безпечно підставляємо назву колонки, так як їх кількість фіксована
@@ -287,7 +289,9 @@ class Stats(commands.Cog):
             return 0
         async with self.bot.db.execute(f'SELECT {column} FROM text_stats WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
             res = await cursor.fetchone()
-            return res[0] or 0
+            if res:
+                return res[0] or 0
+            return 0
 
     async def format_time(self, seconds):
         if seconds < 60:
