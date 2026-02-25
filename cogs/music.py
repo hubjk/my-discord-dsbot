@@ -161,7 +161,8 @@ class PlayerView(discord.ui.View):
         embed.add_field(name=" │ ".join(info_parts), value=f"**{len(queue)}** у черзі", inline=False)
 
         if queue:
-            embed.add_field(name="Наступна", value=queue[0]['title'], inline=False)
+            next_title = discord.utils.escape_markdown(queue[0]['title'])
+            embed.add_field(name="Наступна", value=next_title, inline=False)
 
         embed.set_footer(text="⏪⏩ Перемотка │ 🔉� Гучність │ � Петля │ 🎧 Фільтри")
         return embed
@@ -831,7 +832,7 @@ class Music(commands.Cog):
             return await ctx.send(f"✅ Переміщено на початок: {titles}", delete_after=15)
 
         # Якщо аргументів немає — показуємо список
-        lines = [f"`{i+1}.` {s['title']}" for i, s in enumerate(queue[:20])]
+        lines = [f"`{i+1}.` {discord.utils.escape_markdown(s['title'])}" for i, s in enumerate(queue[:20])]
         if len(queue) > 20:
             lines.append(f"\n*...і ще {len(queue) - 20} треків.*")
 
@@ -997,7 +998,12 @@ class Music(commands.Cog):
             
         queue = self.queues.setdefault(gid, [])
         queue.clear() # Очищаємо поточну, щоб відновити саме ту, що була
+        
+        # Щоб не дублювати пісню, яка і так зараз почне грати (url), ми не додаємо її в чергу
+        # Це стається якщо бот крашнувся і пісня залишилась і як "поточна", і як перша в music_queues
         for r_url, r_title, r_uid in rows:
+            if r_url == url and len(queue) == 0:
+                continue # Пропускаємо поточну пісню, якщо вона перша в базі
             queue.append({'url': r_url, 'title': r_title, 'requester_id': r_uid})
 
         # 4. Запускаємо відтворення з позиції
