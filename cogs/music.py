@@ -166,10 +166,13 @@ class PlayerView(discord.ui.View):
         embed.set_footer(text="⏪⏩ Перемотка │ 🔉� Гучність │ � Петля │ 🎧 Фільтри")
         return embed
 
-    async def update_message(self, interaction: discord.Interaction):
+    async def update_message(self, interaction: discord.Interaction = None):
         try:
-            await interaction.response.edit_message(embed=self.build_embed(), view=self)
-        except Exception:
+            if interaction:
+                await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            elif self.message:
+                await self.message.edit(embed=self.build_embed(), view=self)
+        except Exception as e:
             pass
 
     # ─── Ряд 1: Перемотка, Пауза, Вперед, Скіп, Шафл ───────
