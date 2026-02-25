@@ -212,6 +212,13 @@ class ServerManagementBot(commands.Bot):
                     print(f"✅ Завантажено модуль: {filename}")
                 except Exception as e:
                     print(f"❌ Помилка завантаження {filename}: {e}")
+        
+        # Синхронізація команд (slash commands)
+        try:
+            await self.tree.sync()
+            print("🔄 Командне дерево синхронізовано.")
+        except Exception as e:
+            print(f"⚠️ Помилка синхронізації команд: {e}")
 
     async def close(self):
         if hasattr(self, 'db'):

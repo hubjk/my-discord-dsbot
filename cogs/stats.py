@@ -200,18 +200,18 @@ class Stats(commands.Cog):
         await self.bot.db.commit()
         await ctx.send(f"✅ Канал для підсумків активності встановлено на {channel.mention}.")
 
-    @commands.command(name="privacy", aliases=["приватність"], help="Налаштування приватності вашої статистики")
+    @commands.hybrid_command(name="privacy", aliases=["приватність"], help="Налаштувати свою приватність")
     async def privacy(self, ctx):
         view = PrivacyView(self.bot, ctx.author.id, ctx.guild.id)
         await view.load_settings()
-        await ctx.send(embed=view.create_embed(), view=view)
+        await ctx.send(embed=view.create_embed(), view=view, ephemeral=True)
 
-    @commands.command(name="adminpanel", aliases=["адмінка"], help="Головна панель керування ботом")
+    @commands.hybrid_command(name="adminpanel", aliases=["адмінка"], help="Головна панель керування ботом")
     @commands.check(is_admin)
     async def admin_panel(self, ctx):
         view = AdminPanelView(self.bot, ctx.guild.id)
         await view.load_settings()
-        await ctx.send(embed=view.create_embed(), view=view)
+        await ctx.send(embed=view.create_embed(), view=view, ephemeral=True)
 
     @tasks.loop(hours=1.0)
     async def check_summaries(self):
