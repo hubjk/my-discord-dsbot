@@ -318,9 +318,13 @@ class Stats(commands.Cog):
         if seconds < 60:
             return f"{seconds} с"
         minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes} хв"
         hours = minutes // 60
         minutes = minutes % 60
-        return f"{hours}:{minutes:02d}"
+        if minutes == 0:
+            return f"{hours} год"
+        return f"{hours} год {minutes} хв"
 
     async def post_summary(self, guild, channel, period_type, period_name, text_column, reset_query):
         """Публікує ТОП-10 та обнуляє лічильник для вказаного періоду."""
