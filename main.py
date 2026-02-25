@@ -199,6 +199,18 @@ class ServerManagementBot(commands.Bot):
             )
         ''')
 
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS music_current_playback (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                url TEXT,
+                title TEXT,
+                position REAL,
+                requester_id INTEGER,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         await self.db.commit()
 
         # Автоматичне завантаження всіх cogs (модулів) з папки cogs

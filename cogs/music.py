@@ -352,23 +352,29 @@ class Music(commands.Cog):
         return self._play_lock[guild_id]
 
     async def _progress_loop(self, guild_id: int):
-        """Оновлює прогрес-бар кожні 10 секунд."""
-        try:
-            while True:
-                await asyncio.sleep(10)
-                view = self._views.get(guild_id)
-                msg = self._now_playing.get(guild_id)
-                if not view or not msg:
-                    break
-                vc = view.ctx.voice_client
-                if not vc or (not vc.is_playing() and not vc.is_paused()):
-                    break
+        """Оновлює прогрес-бар кожні 10 секунд та зберігає стан у БД."""
+        while guild_id in self._progress_tasks:
+            await asyncio.sleep(10)
+            if guild_id in self._now_playing:
                 try:
-                    await msg.edit(embed=view.build_embed())
-                except Exception:
+                    await self._now_playing[guild_id].update_message(None)
+                    
+                    # Зберігаємо ПОТОЧНУ ПОЗИЦІЮ в БД для відновлення
+                    pos = self._get_position(guild_id)
+                    cur = self._current.get(guild_id, {})
+                    if cur and cur.get('song'):
+                        song = cur['song']
+                        await self.bot.db.execute('''
+                            UPDATE music_current_playback 
+                            SET position = ? 
+                            WHERE guild_id = ?
+                        ''', (pos, guild_id))
+                        await self.bot.db.commit()
+                except Exception as e:
+                    print(f"[Music] Progress loop error for {guild_id}: {e}")
                     break
-        except asyncio.CancelledError:
-            pass
+            else:
+                break
 
     def _start_progress(self, guild_id: int):
         """Запускає фонове оновлення прогресу."""
@@ -384,14 +390,17 @@ class Music(commands.Cog):
     async def _cleanup_panel(self, guild_id: int):
         """Централізовано видаляє панель та зупиняє ресурси."""
         self._stop_progress(guild_id)
-        self._views.pop(guild_id, None)
-        msg = self._now_playing.pop(guild_id, None)
-        if msg:
+        if guild_id in self._now_playing:
             try:
-                await msg.delete()
+                view = self._now_playing.pop(guild_id)
+                await view.ctx.send(f"⏹️ Відтворення зупинено. Панель видалено.", delete_after=5)
             except Exception:
                 pass
-        # Скидаємо статус бота
+        self._current.pop(guild_id, None)
+        
+        # Видаляємо стан відтворення з БД
+        await self.bot.db.execute('DELETE FROM music_current_playback WHERE guild_id = ?', (guild_id,))
+        await self.bot.db.commit()
         await self.bot.change_presence(activity=discord.Activity(
             type=discord.ActivityType.watching, name="на сервер"))
 
@@ -574,6 +583,21 @@ class Music(commands.Cog):
                 'seeking': False,
                 'song': song,
             }
+
+            # Зберігаємо СТАН в БД для відновлення (на випадок крашу)
+            # Примітка: channel_id беремо з поточного з'єднання
+            channel_id = ctx.voice_client.channel.id
+            await self.bot.db.execute('''
+                INSERT INTO music_current_playback (guild_id, channel_id, url, title, position, requester_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                channel_id = excluded.channel_id,
+                url = excluded.url,
+                title = excluded.title,
+                position = excluded.position,
+                requester_id = excluded.requester_id
+            ''', (gid, channel_id, song['url'], title, 0.0, song.get('requester_id')))
+            await self.bot.db.commit()
 
             # Історія
             hist = self.history.setdefault(gid, [])
@@ -919,6 +943,75 @@ class Music(commands.Cog):
                 await self.play_next(ctx)
         else:
             await ctx.send("ℹ️ Всі ваші треки вже в сьогоднішній черзі.", delete_after=10)
+
+    @commands.command(name="playcontinue", aliases=["playc", "pc", "продовжити"], help="Відновити останню сесію (канал, пісню та час)")
+    async def play_continue(self, ctx):
+        try:
+            await ctx.message.delete(delay=10)
+        except Exception:
+            pass
+
+        gid = ctx.guild.id
+        
+        # 1. Отримуємо збережений стан
+        async with self.bot.db.execute('SELECT channel_id, url, title, position, requester_id FROM music_current_playback WHERE guild_id = ?', (gid,)) as cursor:
+            playback = await cursor.fetchone()
+            
+        if not playback:
+            return await ctx.send("❌ Немає збереженої активної сесії для цього сервера.", delete_after=10)
+            
+        ch_id, url, title, pos, req_id = playback
+        
+        # 2. Заходимо в канал
+        channel = self.bot.get_channel(ch_id)
+        if not channel:
+            return await ctx.send("❌ Не вдалося знайти попередній голосовий канал.", delete_after=10)
+            
+        if not ctx.voice_client:
+            await channel.connect()
+        elif ctx.voice_client.channel.id != ch_id:
+            await ctx.voice_client.move_to(channel)
+
+        # 3. Відновлюємо чергу
+        async with self.bot.db.execute('SELECT url, title, user_id FROM music_queues WHERE guild_id = ? ORDER BY pos ASC', (gid,)) as cursor:
+            rows = await cursor.fetchall()
+            
+        queue = self.queues.setdefault(gid, [])
+        queue.clear() # Очищаємо поточну, щоб відновити саме ту, що була
+        for r_url, r_title, r_uid in rows:
+            queue.append({'url': r_url, 'title': r_title, 'requester_id': r_uid})
+
+        # 4. Запускаємо відтворення з позиції
+        try:
+            stream_url, ext_title, duration = await self._extract_stream(url)
+            
+            # Налаштовуємо поточний стан
+            self._current[gid] = {
+                'stream_url': stream_url,
+                'duration': duration,
+                'start_time': time.time(),
+                'offset': pos,
+                'paused_total': 0,
+                'paused_at': 0,
+                'seeking': False,
+                'song': {'url': url, 'title': title, 'requester_id': req_id},
+            }
+            
+            # Використовуємо внутрішній механізм перемотування для старту з потрібної секунди
+            await self._seek_to(ctx, gid, pos)
+            
+            await ctx.send(f"▶️ Відновлено сесію: **{title}** з `{int(pos)}с`. У черзі: **{len(queue)}**.", delete_after=15)
+            
+            # Запускаємо панель
+            if gid not in self._now_playing:
+                view = PlayerView(self, ctx, title)
+                msg = await ctx.send(embed=view.build_embed(), view=view)
+                self._now_playing[gid] = view # Зберігаємо view безпосередньо як у новій логіці
+                self._start_progress(gid)
+
+        except Exception as e:
+            await ctx.send(f"❌ Помилка відновлення: {e}")
+            print(f"[Music] Continue error: {e}")
 
     @commands.command(name="volume", aliases=["vol", "гучність"], help="Змінити гучність (10-200)")
     async def volume_cmd(self, ctx, level: int = None):
