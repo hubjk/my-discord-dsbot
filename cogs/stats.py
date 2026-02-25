@@ -191,10 +191,14 @@ class Stats(commands.Cog):
         self._text_cache: dict[tuple[int, int], int] = {} # {(user_id, guild_id): word_count_to_add}
         # Відстеження нарахування XP за голос у поточній сесії (кількість 5-хвилинних блоків)
         self.voice_xp_blocks: dict[tuple[int, int], int] = {} # {(user_id, guild_id): awarded_blocks}
+        # Час останнього збереження голосу в БД (для періодичного збереження)
+        self.last_voice_update: dict[tuple[int, int], datetime] = {} # {(user_id, guild_id): last_save_time}
 
         self.save_text_task.start()
         self.check_summaries.start()
         self.check_afk_task.start()
+        # Запускаємо відновлення сесій
+        self.bot.loop.create_task(self.sync_voice_sessions())
 
     def cog_unload(self):
         self.save_text_task.cancel()
@@ -211,6 +215,21 @@ class Stats(commands.Cog):
         except Exception:
             pass
         return default
+
+    async def sync_voice_sessions(self):
+        """Сканує всі голосові канали та ініціалізує сесії для тих, хто вже там є."""
+        await self.bot.wait_until_ready()
+        now = datetime.now()
+        for guild in self.bot.guilds:
+            for channel in guild.voice_channels:
+                for member in channel.members:
+                    if member.bot: continue
+                    key = (member.id, guild.id)
+                    if key not in self.voice_sessions:
+                        self.voice_sessions[key] = now
+                        self.last_voice_update[key] = now
+                        self.voice_xp_blocks[key] = 0
+        print(f"[Stats] Відновлено {len(self.voice_sessions)} активних голосових сесій.")
 
     @commands.command(name="setsummarychannel", help="Встановити канал для підсумків активності (тільки для адмінів)")
     @commands.check(is_admin)
@@ -532,11 +551,13 @@ class Stats(commands.Cog):
             key = (message.author.id, message.guild.id)
             self._text_cache[key] = self._text_cache.get(key, 0) + word_count
 
-    async def save_voice_session(self, user_id: int, guild_id: int, channel_id: int, start_time: datetime):
-        """Зберігає завершену голосову сесію в БД."""
-        duration_seconds = int((datetime.now() - start_time).total_seconds())
+    async def save_voice_session(self, user_id: int, guild_id: int, channel_id: int, start_time: datetime, duration_override=None):
+        """Зберігає голосову сесію (або її частину) в БД."""
+        now = datetime.now()
+        duration_seconds = duration_override if duration_override is not None else int((now - start_time).total_seconds())
+        
         if duration_seconds < 1:
-            return # Ігноруємо кліки (менше секунди)
+            return
             
         try:
             # 1. Оновлюємо статику по каналу (для улюбленого каналу)
@@ -561,20 +582,30 @@ class Stats(commands.Cog):
             await self.bot.db.commit()
             
             # 3. Нарахування XP за голос (залишок часу)
-            xp_enabled = await self.get_setting(guild_id, "voice_xp_enabled", 1)
-            if xp_enabled:
-                levels_cog = self.bot.get_cog("Levels")
-                if levels_cog:
-                    # Рахуємо скільки XP ще НЕ було нараховано періодично
-                    awarded_blocks = self.voice_xp_blocks.pop((user_id, guild_id), 0)
-                    total_blocks = duration_seconds // 300
-                    remaining_blocks = total_blocks - awarded_blocks
-                    
-                    if remaining_blocks > 0:
-                        xp_to_add = remaining_blocks * 3
-                        guild = self.bot.get_guild(guild_id)
-                        channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
-                        await levels_cog.add_xp(user_id, guild_id, xp_to_add, channel)
+            # Якщо ми викликаємо save_voice_session з duration_override (з check_afk_task), 
+            # ми НЕ видаємо XP тут, бо воно видається окремо в циклі check_afk_task
+            if duration_override is None:
+                xp_enabled = await self.get_setting(guild_id, "voice_xp_enabled", 1)
+                if xp_enabled:
+                    levels_cog = self.bot.get_cog("Levels")
+                    if levels_cog:
+                        # Скільки всього блоків за ВСЮ сесію
+                        full_session_duration = int((now - start_time).total_seconds())
+                        total_blocks = full_session_duration // 300
+                        awarded_blocks = self.voice_xp_blocks.pop((user_id, guild_id), 0)
+                        remaining_blocks = total_blocks - awarded_blocks
+                        
+                        if remaining_blocks > 0:
+                            xp_to_add = remaining_blocks * 3
+                            guild = self.bot.get_guild(guild_id)
+                            channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+                            await levels_cog.add_xp(user_id, guild_id, xp_to_add, channel)
+            
+            # Якщо це фінальне збереження (Duration override is None), чистимо кеш останнього оновлення
+            if duration_override is None:
+                self.last_voice_update.pop((user_id, guild_id), None)
+                self.voice_xp_blocks.pop((user_id, guild_id), None)
+
         except Exception as e:
             print(f"[Stats] Помилка збереження голосової статистики: {e}")
 
@@ -589,7 +620,9 @@ class Stats(commands.Cog):
         
         # Випадок 1: Користувач приєднався до каналу
         if before.channel is None and after.channel is not None:
-            self.voice_sessions[key] = datetime.now()
+            now = datetime.now()
+            self.voice_sessions[key] = now
+            self.last_voice_update[key] = now
             self.afk_start_times.pop(key, None)
             self.voice_xp_blocks[key] = 0
             
@@ -607,7 +640,9 @@ class Stats(commands.Cog):
             if start_time:
                 await self.save_voice_session(user_id, guild_id, before.channel.id, start_time)
             # Починаємо нову сесію для нового каналу
-            self.voice_sessions[key] = datetime.now()
+            now = datetime.now()
+            self.voice_sessions[key] = now
+            self.last_voice_update[key] = now
             self.voice_xp_blocks[key] = 0
 
     @tasks.loop(minutes=1.0)
@@ -625,7 +660,16 @@ class Stats(commands.Cog):
                 self.afk_start_times.pop(key, None)
                 continue
             
-            # 1. Періодичне нарахування XP (кожні 5 хв)
+            # 1. Періодичне збереження часу в БД (щохвилини)
+            last_save = self.last_voice_update.get(key)
+            if last_save:
+                delta = int((now - last_save).total_seconds())
+                if delta >= 30: # Зберігаємо якщо пройшло хоча б півхвилини
+                    self.last_voice_update[key] = now
+                    # Викликаємо збереження з duration_override
+                    await self.save_voice_session(user_id, guild_id, member.voice.channel.id, self.voice_sessions[key], duration_override=delta)
+
+            # 2. Періодичне нарахування XP (кожні 5 хв)
             xp_enabled = await self.get_setting(guild_id, "voice_xp_enabled", 1)
             if xp_enabled:
                 duration = int((now - self.voice_sessions[key]).total_seconds())
@@ -637,10 +681,9 @@ class Stats(commands.Cog):
                     if levels_cog:
                         xp_to_add = (total_blocks - awarded_blocks) * 3
                         self.voice_xp_blocks[key] = total_blocks
-                        # Нараховуємо XP (без повідомлення в канал кожні 5 хв, щоб не спамити)
                         await levels_cog.add_xp(user_id, guild_id, xp_to_add, None)
 
-            # 2. Перевіряємо чи ввімкнено Anti-AFK на сервері
+            # 3. Перевіряємо чи ввімкнено Anti-AFK на сервері
             anti_afk_enabled = await self.get_setting(guild_id, "anti_afk_enabled", 1)
             if not anti_afk_enabled: continue
             

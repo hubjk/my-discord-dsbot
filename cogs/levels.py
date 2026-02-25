@@ -219,10 +219,10 @@ class Levels(commands.Cog):
                 
                 if show_voice:
                     v_sec = await stats_cog.get_total_voice_time(uid, gid)
-                    sess = stats_cog.voice_sessions.get((uid, gid))
-                    if sess:
+                    last_upd = stats_cog.last_voice_update.get((uid, gid))
+                    if last_upd:
                         import datetime
-                        v_sec += int((datetime.datetime.now() - sess).total_seconds())
+                        v_sec += int((datetime.datetime.now() - last_upd).total_seconds())
                     
                     time_str = await stats_cog.format_time(v_sec)
                     activity_stats += f"🎙️ **Голос:** `{time_str}`"
