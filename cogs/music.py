@@ -979,9 +979,17 @@ class Music(commands.Cog):
             return await ctx.send("❌ Не вдалося знайти попередній голосовий канал.", delete_after=10)
             
         if not ctx.voice_client:
-            await channel.connect()
+            try:
+                await channel.connect(timeout=15.0)
+            except asyncio.TimeoutError:
+                return await ctx.send("❌ Discord довго не відповідає (таймаут підключення). Спробуйте ще раз за хвилину.", delete_after=10)
+            except Exception as e:
+                return await ctx.send(f"❌ Не вдалося підключитися: {e}", delete_after=10)
         elif ctx.voice_client.channel.id != ch_id:
-            await ctx.voice_client.move_to(channel)
+            try:
+                await ctx.voice_client.move_to(channel)
+            except Exception:
+                pass
 
         # 3. Відновлюємо чергу
         async with self.bot.db.execute('SELECT url, title, user_id FROM music_queues WHERE guild_id = ? ORDER BY pos ASC', (gid,)) as cursor:
