@@ -176,7 +176,7 @@ class Levels(commands.Cog):
         # Обчислюємо прогрес для бару
         xp_in_level = xp - current_level_xp
         needed_for_next = next_level_xp - current_level_xp
-        progress = max(0, min(1, xp_in_level / needed_for_next))
+        progress = max(0.0, min(1.0, xp_in_level / needed_for_next))
         
         embed = discord.Embed(
             title=f"✨ Картка активності: {member.display_name}", 

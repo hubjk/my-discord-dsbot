@@ -122,7 +122,13 @@ class AdminPanelView(discord.ui.View):
     async def toggle_setting(self, interaction, setting_name):
         new_val = 1 if not self.settings.get(setting_name) else 0
         self.settings[setting_name] = new_val
-        await self.bot.db.execute(f'UPDATE server_settings SET {setting_name} = ? WHERE guild_id = ?', (new_val, self.guild_id))
+        
+        # Використовуємо UPSERT (якщо запису немає - створимо, якщо є - оновимо одну колонку)
+        await self.bot.db.execute(f'''
+            INSERT INTO server_settings (guild_id, {setting_name}) 
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET {setting_name} = excluded.{setting_name}
+        ''', (self.guild_id, new_val))
         await self.bot.db.commit()
         await interaction.response.edit_message(embed=self.create_embed(), view=self)
 
@@ -183,6 +189,9 @@ class Stats(commands.Cog):
         
         # Кеш для тексту, щоб не писати кожне повідомлення в БД одразу
         self._text_cache: dict[tuple[int, int], int] = {} # {(user_id, guild_id): word_count_to_add}
+        # Відстеження нарахування XP за голос у поточній сесії (кількість 5-хвилинних блоків)
+        self.voice_xp_blocks: dict[tuple[int, int], int] = {} # {(user_id, guild_id): awarded_blocks}
+
         self.save_text_task.start()
         self.check_summaries.start()
         self.check_afk_task.start()
@@ -191,6 +200,17 @@ class Stats(commands.Cog):
         self.save_text_task.cancel()
         self.check_summaries.cancel()
         self.check_afk_task.cancel()
+
+    async def get_setting(self, guild_id: int, key: str, default):
+        """Отримує налаштування сервера, повертає дефолтне якщо запису немає."""
+        try:
+            async with self.bot.db.execute(f'SELECT {key} FROM server_settings WHERE guild_id = ?', (guild_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row is not None and row[0] is not None:
+                    return row[0]
+        except Exception:
+            pass
+        return default
 
     @commands.command(name="setsummarychannel", help="Встановити канал для підсумків активності (тільки для адмінів)")
     @commands.check(is_admin)
@@ -378,21 +398,20 @@ class Stats(commands.Cog):
         await channel.send(embed=embed)
         
         # 4a. AI Підсумок (якщо ввімкнено)
-        async with self.bot.db.execute('SELECT ai_summary_enabled FROM server_settings WHERE guild_id = ?', (guild.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                ai_text = await self.generate_ai_summary(guild, period_name, top_10)
-                if ai_text:
-                    ai_embed = discord.Embed(title=f"🤖 ШІ-Підсумок {period_name}", description=ai_text, color=discord.Color.blue())
-                    await channel.send(embed=ai_embed)
+        ai_enabled = await self.get_setting(guild.id, "ai_summary_enabled", 0)
+        if ai_enabled:
+            ai_text = await self.generate_ai_summary(guild, period_name, top_10)
+            if ai_text:
+                ai_embed = discord.Embed(title=f"🤖 ШІ-Підсумок {period_name}", description=ai_text, color=discord.Color.blue())
+                await channel.send(embed=ai_embed)
 
         # 4b. Динамічні Ролі (якщо ввімкнено та період тиждень)
         if period_type == "week":
-            async with self.bot.db.execute('SELECT dynamic_roles_enabled, speaker_role_id, writer_role_id FROM server_settings WHERE guild_id = ?', (guild.id,)) as cursor:
-                row = await cursor.fetchone()
-                if row and row[0]:
-                    speaker_rid, writer_rid = row[1], row[2]
-                    await self.assign_dynamic_roles(guild, speaker_rid, writer_rid, voice_ranks, text_ranks)
+            dynamic_enabled = await self.get_setting(guild.id, "dynamic_roles_enabled", 0)
+            if dynamic_enabled:
+                speaker_rid = await self.get_setting(guild.id, "speaker_role_id", None)
+                writer_rid = await self.get_setting(guild.id, "writer_role_id", None)
+                await self.assign_dynamic_roles(guild, speaker_rid, writer_rid, voice_ranks, text_ranks)
         
         # 5. Обнуляємо лічильники тексту та голосу за цей період
         await self.bot.db.execute(f'UPDATE text_stats SET {reset_query} WHERE guild_id = ?', (guild.id,))
@@ -537,22 +556,21 @@ class Stats(commands.Cog):
             
             await self.bot.db.commit()
             
-            # 3. Нарахування XP за голос
-            async with self.bot.db.execute('SELECT voice_xp_enabled FROM server_settings WHERE guild_id = ?', (guild_id,)) as cursor:
-                row = await cursor.fetchone()
-                if row and row[0]:
-                    levels_cog = self.bot.get_cog("Levels")
-                    if levels_cog:
-                        # 3 XP за кожні 5 хвилин (300 секунд)
-                        xp_to_add = (duration_seconds // 300) * 3
-                        if xp_to_add > 0:
-                            guild = self.bot.get_guild(guild_id)
-                            channel = None
-                            if guild:
-                                # Намагаємось знайти підходящий канал для привітання
-                                channel = guild.system_channel or guild.text_channels[0]
-                            await levels_cog.add_xp(user_id, guild_id, xp_to_add, channel)
-
+            # 3. Нарахування XP за голос (залишок часу)
+            xp_enabled = await self.get_setting(guild_id, "voice_xp_enabled", 1)
+            if xp_enabled:
+                levels_cog = self.bot.get_cog("Levels")
+                if levels_cog:
+                    # Рахуємо скільки XP ще НЕ було нараховано періодично
+                    awarded_blocks = self.voice_xp_blocks.pop((user_id, guild_id), 0)
+                    total_blocks = duration_seconds // 300
+                    remaining_blocks = total_blocks - awarded_blocks
+                    
+                    if remaining_blocks > 0:
+                        xp_to_add = remaining_blocks * 3
+                        guild = self.bot.get_guild(guild_id)
+                        channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+                        await levels_cog.add_xp(user_id, guild_id, xp_to_add, channel)
         except Exception as e:
             print(f"[Stats] Помилка збереження голосової статистики: {e}")
 
@@ -569,6 +587,7 @@ class Stats(commands.Cog):
         if before.channel is None and after.channel is not None:
             self.voice_sessions[key] = datetime.now()
             self.afk_start_times.pop(key, None)
+            self.voice_xp_blocks[key] = 0
             
         # Випадок 2: Користувач покинув канал
         elif before.channel is not None and after.channel is None:
@@ -585,6 +604,7 @@ class Stats(commands.Cog):
                 await self.save_voice_session(user_id, guild_id, before.channel.id, start_time)
             # Починаємо нову сесію для нового каналу
             self.voice_sessions[key] = datetime.now()
+            self.voice_xp_blocks[key] = 0
 
     @tasks.loop(minutes=1.0)
     async def check_afk_task(self):
@@ -601,10 +621,24 @@ class Stats(commands.Cog):
                 self.afk_start_times.pop(key, None)
                 continue
             
-            # Перевіряємо чи ввімкнено Anti-AFK на сервері
-            async with self.bot.db.execute('SELECT anti_afk_enabled FROM server_settings WHERE guild_id = ?', (guild_id,)) as cursor:
-                row = await cursor.fetchone()
-                if not row or not row[0]: continue
+            # 1. Періодичне нарахування XP (кожні 5 хв)
+            xp_enabled = await self.get_setting(guild_id, "voice_xp_enabled", 1)
+            if xp_enabled:
+                duration = int((now - self.voice_sessions[key]).total_seconds())
+                total_blocks = duration // 300
+                awarded_blocks = self.voice_xp_blocks.get(key, 0)
+                
+                if total_blocks > awarded_blocks:
+                    levels_cog = self.bot.get_cog("Levels")
+                    if levels_cog:
+                        xp_to_add = (total_blocks - awarded_blocks) * 3
+                        self.voice_xp_blocks[key] = total_blocks
+                        # Нараховуємо XP (без повідомлення в канал кожні 5 хв, щоб не спамити)
+                        await levels_cog.add_xp(user_id, guild_id, xp_to_add, None)
+
+            # 2. Перевіряємо чи ввімкнено Anti-AFK на сервері
+            anti_afk_enabled = await self.get_setting(guild_id, "anti_afk_enabled", 1)
+            if not anti_afk_enabled: continue
             
             channel = member.voice.channel
             is_muted = member.voice.self_mute or member.voice.self_deaf
