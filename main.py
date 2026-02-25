@@ -102,6 +102,103 @@ class ServerManagementBot(commands.Bot):
             )
         ''')
 
+        # === Нові таблиці для статистики активності (Голос/Текст) ===
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS voice_stats (
+                user_id INTEGER,
+                guild_id INTEGER,
+                channel_id INTEGER,
+                total_time INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, guild_id, channel_id)
+            )
+        ''')
+
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS text_stats (
+                user_id INTEGER,
+                guild_id INTEGER,
+                words_week INTEGER DEFAULT 0,
+                words_month INTEGER DEFAULT 0,
+                words_year INTEGER DEFAULT 0,
+                words_total INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, guild_id)
+            )
+        ''')
+
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS user_privacy (
+                user_id INTEGER,
+                guild_id INTEGER,
+                show_voice BOOLEAN DEFAULT 1,
+                show_text BOOLEAN DEFAULT 1,
+                show_favorite_channel BOOLEAN DEFAULT 1,
+                PRIMARY KEY (user_id, guild_id)
+            )
+        ''')
+
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS server_settings (
+                guild_id INTEGER PRIMARY KEY,
+                summary_channel_id INTEGER,
+                ai_summary_enabled BOOLEAN DEFAULT 0,
+                voice_xp_enabled BOOLEAN DEFAULT 1,
+                dynamic_roles_enabled BOOLEAN DEFAULT 0,
+                anti_afk_enabled BOOLEAN DEFAULT 1,
+                speaker_role_id INTEGER,
+                writer_role_id INTEGER,
+                last_weekly_reset TIMESTAMP,
+                last_monthly_reset TIMESTAMP,
+                last_yearly_reset TIMESTAMP
+            )
+        ''')
+
+        # Міграція для server_settings (якщо таблиця вже існує)
+        for col, default in [
+            ("ai_summary_enabled", "0"),
+            ("voice_xp_enabled", "1"),
+            ("dynamic_roles_enabled", "0"),
+            ("anti_afk_enabled", "1"),
+            ("speaker_role_id", "NULL"),
+            ("writer_role_id", "NULL")
+        ]:
+            try:
+                await self.db.execute(f'ALTER TABLE server_settings ADD COLUMN {col} INTEGER DEFAULT {default}')
+            except Exception:
+                pass
+
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS achievements (
+                user_id INTEGER,
+                guild_id INTEGER,
+                achievement_id TEXT,
+                date_earned TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, guild_id, achievement_id)
+            )
+        ''')
+
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS voice_activity_stats (
+                user_id INTEGER,
+                guild_id INTEGER,
+                time_week INTEGER DEFAULT 0,
+                time_month INTEGER DEFAULT 0,
+                time_year INTEGER DEFAULT 0,
+                time_total INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, guild_id)
+            )
+        ''')
+
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS music_queues (
+                user_id INTEGER,
+                guild_id INTEGER,
+                url TEXT,
+                title TEXT,
+                pos INTEGER,
+                PRIMARY KEY (user_id, guild_id, pos)
+            )
+        ''')
+
         await self.db.commit()
 
         # Автоматичне завантаження всіх cogs (модулів) з папки cogs

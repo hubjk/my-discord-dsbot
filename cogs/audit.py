@@ -27,6 +27,10 @@ class Audit(commands.Cog):
         if message.author.bot:
             return
             
+        # Ігноруємо видалені команди бота (наприклад, !play), щоб не засмічувати аудит
+        if message.content.startswith('!'):
+            return
+            
         channel = await self.get_audit_channel(message.guild)
         if not channel:
             return

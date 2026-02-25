@@ -224,6 +224,18 @@ class PlayerView(discord.ui.View):
             self.loop_btn.emoji = LOOP_EMOJIS[LOOP_OFF]
         vc = self.ctx.voice_client
         if vc and (vc.is_playing() or vc.is_paused()):
+            # Видаляємо з БД перед скіпом
+            gid = self.ctx.guild.id
+            current = self.cog._current.get(gid, {})
+            if current and current.get('song'):
+                song = current['song']
+                asyncio.run_coroutine_threadsafe(
+                    self.cog.bot.db.execute(
+                        'DELETE FROM music_queues WHERE user_id = ? AND guild_id = ? AND url = ?',
+                        (song.get('requester_id'), gid, song['url'])
+                    ), 
+                    self.cog.bot.loop
+                )
             vc.stop()
         await interaction.response.send_message("⏭️ Пропущено!", ephemeral=True, delete_after=3)
 
@@ -572,6 +584,16 @@ class Music(commands.Cog):
             def after(error):
                 if error:
                     print(f'[Music] Playback error: {error}')
+                
+                # Видаляємо програний трек з БД
+                asyncio.run_coroutine_threadsafe(
+                    self.bot.db.execute(
+                        'DELETE FROM music_queues WHERE user_id = ? AND guild_id = ? AND url = ?',
+                        (song.get('requester_id'), gid, song['url'])
+                    ),
+                    self.bot.loop
+                )
+                
                 cur = self._current.get(gid, {})
                 if cur.get('seeking'):
                     cur['seeking'] = False
@@ -677,10 +699,22 @@ class Music(commands.Cog):
                 url = entry.get('url') or entry.get('webpage_url') or query
                 if not str(url).startswith("http"):
                     continue
-                queue.append({
+                
+                title = entry.get('title', 'Невідомий трек')
+                song_data = {
                     'url': url,
-                    'title': entry.get('title', 'Невідомий трек'),
-                })
+                    'title': title,
+                    'requester_id': ctx.author.id
+                }
+                queue.append(song_data)
+                
+                # Зберігаємо в БД
+                await self.bot.db.execute('''
+                    INSERT INTO music_queues (user_id, guild_id, url, title, pos)
+                    VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(pos), 0) + 1 FROM music_queues WHERE user_id = ? AND guild_id = ?))
+                ''', (ctx.author.id, gid, str(url), title, ctx.author.id, gid))
+            
+            await self.bot.db.commit()
 
             if is_playlist:
                 await ctx.send(f"🎵 Додано **{len(entries)}** треків до черги!", delete_after=10)
@@ -835,9 +869,56 @@ class Music(commands.Cog):
         if gid in self.queues and self.queues[gid]:
             count = len(self.queues[gid])
             self.queues[gid].clear()
+            
+            # Також очищаємо БД
+            await self.bot.db.execute('DELETE FROM music_queues WHERE guild_id = ?', (gid,))
+            await self.bot.db.commit()
+            
             await ctx.send(f"🗑️ Чергу очищено! Видалено **{count}** треків.", delete_after=10)
         else:
             await ctx.send("Черга вже порожня.", delete_after=10)
+
+    @commands.command(name="loadqueue", aliases=["lq", "завантажити"], help="Відновити вашу збережену чергу")
+    async def load_queue(self, ctx):
+        try:
+            await ctx.message.delete(delay=10)
+        except Exception:
+            pass
+
+        if not ctx.voice_client:
+            if not await ctx.invoke(self.join):
+                return
+
+        gid = ctx.guild.id
+        uid = ctx.author.id
+        
+        async with self.bot.db.execute('SELECT url, title FROM music_queues WHERE user_id = ? AND guild_id = ? ORDER BY pos ASC', (uid, gid)) as cursor:
+            rows = await cursor.fetchall()
+            
+        if not rows:
+            return await ctx.send("❌ У вас немає збережених пісень для цього сервера.", delete_after=10)
+            
+        queue = self.queues.setdefault(gid, [])
+        added_count = 0
+        
+        for url, title in rows:
+            # Перевіряємо чи вже є в черзі
+            if any(s['url'] == url for s in queue):
+                continue
+                
+            queue.append({
+                'url': url,
+                'title': title,
+                'requester_id': uid
+            })
+            added_count += 1
+            
+        if added_count > 0:
+            await ctx.send(f"✅ Відновлено **{added_count}** треків з вашої сесії!", delete_after=10)
+            if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                await self.play_next(ctx)
+        else:
+            await ctx.send("ℹ️ Всі ваші треки вже в сьогоднішній черзі.", delete_after=10)
 
     @commands.command(name="volume", aliases=["vol", "гучність"], help="Змінити гучність (10-200)")
     async def volume_cmd(self, ctx, level: int = None):
