@@ -355,9 +355,10 @@ class Music(commands.Cog):
         """Оновлює прогрес-бар кожні 10 секунд та зберігає стан у БД."""
         while guild_id in self._progress_tasks:
             await asyncio.sleep(10)
-            if guild_id in self._now_playing:
+            if guild_id in self._views:
                 try:
-                    await self._now_playing[guild_id].update_message(None)
+                    view = self._views[guild_id]
+                    await view.update_message(None)
                     
                     # Зберігаємо ПОТОЧНУ ПОЗИЦІЮ в БД для відновлення
                     pos = self._get_position(guild_id)
@@ -390,12 +391,18 @@ class Music(commands.Cog):
     async def _cleanup_panel(self, guild_id: int):
         """Централізовано видаляє панель та зупиняє ресурси."""
         self._stop_progress(guild_id)
-        if guild_id in self._now_playing:
+        
+        view = self._views.pop(guild_id, None)
+        if view:
+            view.stop()
+            
+        msg = self._now_playing.pop(guild_id, None)
+        if msg:
             try:
-                view = self._now_playing.pop(guild_id)
-                await view.ctx.send(f"⏹️ Відтворення зупинено. Панель видалено.", delete_after=5)
+                await msg.delete()
             except Exception:
                 pass
+                
         self._current.pop(guild_id, None)
         
         # Видаляємо стан відтворення з БД
@@ -1006,7 +1013,9 @@ class Music(commands.Cog):
             if gid not in self._now_playing:
                 view = PlayerView(self, ctx, title)
                 msg = await ctx.send(embed=view.build_embed(), view=view)
-                self._now_playing[gid] = view # Зберігаємо view безпосередньо як у новій логіці
+                view.message = msg
+                self._views[gid] = view
+                self._now_playing[gid] = msg
                 self._start_progress(gid)
 
         except Exception as e:
