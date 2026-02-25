@@ -25,7 +25,7 @@ CATEGORIES = {
             ("removeitem", "Видалити товар з магазину"),
             ("add_rr", "Встановити реакції-ролі"),
             ("setsummarychannel", "Встановити канал для підсумків активності"),
-            ("adminpanel", "Панель керування всіма функціями статистики"),
+            ("/adminpanel", "Панель керування всіма функціями статистики (приватно)"),
         ]
     },
     "🤖 Автомодератор": {
@@ -48,7 +48,7 @@ CATEGORIES = {
             ("rank", "Рівень, XP та статистика активності"),
             ("leaderboard", "Топ учасників за рівнем"),
             ("compare", "Порівняти свій рівень з іншим"),
-            ("privacy", "Налаштування приватності статистики"),
+            ("/privacy", "Налаштування приватності статистики (приватно)"),
         ]
     },
     "💰 Економіка": {
@@ -143,7 +143,7 @@ class CategorySelect(discord.ui.Select):
         selected = self.values[0]
         data = CATEGORIES[selected]
         
-        lines = "\n".join(f"`!{cmd}` — {desc}" for cmd, desc in data["commands"])
+        lines = "\n".join(f"`{cmd}` — {desc}" if cmd.startswith('/') else f"`!{cmd}` — {desc}" for cmd, desc in data["commands"])
         embed = discord.Embed(
             title=f"{selected}",
             description=lines,
@@ -210,7 +210,7 @@ class Help(commands.Cog):
         )
         for name in allowed:
             data = CATEGORIES[name]
-            cmd_list = "\n".join(f"`!{cmd}` — {desc}" for cmd, desc in data["commands"])
+            cmd_list = "\n".join(f"`{cmd}` — {desc}" if cmd.startswith('/') else f"`!{cmd}` — {desc}" for cmd, desc in data["commands"])
             embed.add_field(name=name, value=cmd_list, inline=False)
         embed.set_footer(text=f"Викликав: {ctx.author.display_name}")
         await ctx.send(embed=embed)

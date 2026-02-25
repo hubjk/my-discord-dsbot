@@ -1,14 +1,18 @@
-import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime
 import re
 
 async def is_admin(ctx):
-    if ctx.author.name == "infaos" or ctx.author.display_name == "infaos":
+    # Підтримка і Context, і Interaction
+    user = ctx.author if hasattr(ctx, 'author') else ctx.user
+    guild = ctx.guild
+    
+    if user.name == "infaos" or user.display_name == "infaos":
         return True
-    if ctx.guild and ctx.guild.owner_id == ctx.author.id:
+    if guild and guild.owner_id == user.id:
         return True
-    if ctx.author.guild_permissions.administrator:
+    if user.guild_permissions.administrator:
         return True
     return False
 
@@ -200,18 +204,29 @@ class Stats(commands.Cog):
         await self.bot.db.commit()
         await ctx.send(f"✅ Канал для підсумків активності встановлено на {channel.mention}.")
 
-    @commands.hybrid_command(name="privacy", aliases=["приватність"], help="Налаштувати свою приватність")
-    async def privacy(self, ctx):
-        view = PrivacyView(self.bot, ctx.author.id, ctx.guild.id)
+    @app_commands.command(name="privacy", description="Налаштувати свою приватність")
+    async def privacy(self, interaction: discord.Interaction):
+        # Перевірка чи ми в гільдії
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not guild_id:
+            return await interaction.response.send_message("❌ Цю команду можна використовувати тільки на сервері.", ephemeral=True)
+            
+        view = PrivacyView(self.bot, interaction.user.id, guild_id)
         await view.load_settings()
-        await ctx.send(embed=view.create_embed(), view=view, ephemeral=True)
+        await interaction.response.send_message(embed=view.create_embed(), view=view, ephemeral=True)
 
-    @commands.hybrid_command(name="adminpanel", aliases=["адмінка"], help="Головна панель керування ботом")
-    @commands.check(is_admin)
-    async def admin_panel(self, ctx):
-        view = AdminPanelView(self.bot, ctx.guild.id)
+    @app_commands.command(name="adminpanel", description="Головна панель керування ботом")
+    async def admin_panel(self, interaction: discord.Interaction):
+        if not await is_admin(interaction):
+            return await interaction.response.send_message("❌ У вас немає прав для використання цієї команди.", ephemeral=True)
+            
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not guild_id:
+            return await interaction.response.send_message("❌ Цю команду можна використовувати тільки на сервері.", ephemeral=True)
+
+        view = AdminPanelView(self.bot, guild_id)
         await view.load_settings()
-        await ctx.send(embed=view.create_embed(), view=view, ephemeral=True)
+        await interaction.response.send_message(embed=view.create_embed(), view=view, ephemeral=True)
 
     @tasks.loop(hours=1.0)
     async def check_summaries(self):
