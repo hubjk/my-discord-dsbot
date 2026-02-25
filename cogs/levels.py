@@ -171,75 +171,83 @@ class Levels(commands.Cog):
             
         level = self.calculate_level(xp)
         next_level_xp = self.calculate_xp_for_level(level + 1)
+        current_level_xp = self.calculate_xp_for_level(level)
         
-        embed = discord.Embed(title=f"Статистика {member.display_name}", color=discord.Color.blue())
+        # Обчислюємо прогрес для бару
+        xp_in_level = xp - current_level_xp
+        needed_for_next = next_level_xp - current_level_xp
+        progress = max(0, min(1, xp_in_level / needed_for_next))
+        
+        embed = discord.Embed(
+            title=f"✨ Картка активності: {member.display_name}", 
+            color=discord.Color.from_rgb(255, 215, 0) # Золотий
+        )
         if member.display_avatar:
             embed.set_thumbnail(url=member.display_avatar.url)
         
-        embed.add_field(name="Рівень", value=f"**{level}**", inline=True)
-        embed.add_field(name="Досвід", value=f"**{xp} / {next_level_xp} XP**", inline=True)
+        # 1. Секція Рівня
+        embed.add_field(
+            name="📊 Рівень та Досвід", 
+            value=f"**Рівень:** `{level}`\n**XP:** `{xp:,} / {next_level_xp:,}`", 
+            inline=True
+        )
         
-        # Досягнення
+        # 2. Секція Досягнень
         async with self.bot.db.execute('SELECT achievement_id FROM achievements WHERE user_id = ? AND guild_id = ?', (uid, gid)) as cursor:
             achs = await cursor.fetchall()
         
         if achs:
             ach_map = {"novice": "🐣", "active": "🔥", "expert": "🎓", "legend": "👑"}
             icons = " ".join([ach_map.get(a[0], "🏅") for a in achs])
-            embed.add_field(name="Досягнення", value=icons, inline=True)
-        
-        # Отримуємо додаткову статистику
+            embed.add_field(name="🏆 Медалі", value=icons, inline=True)
+        else:
+            embed.add_field(name="🏆 Медалі", value="*Шлях тільки починається*", inline=True)
+
+        # 3. Секція Активності (Текст + Голос)
+        activity_stats = ""
         try:
             stats_cog = self.bot.get_cog("Stats")
             if stats_cog:
-                # Читаємо налаштування приватності
                 async with self.bot.db.execute('SELECT show_voice, show_text, show_favorite_channel FROM user_privacy WHERE user_id = ? AND guild_id = ?', (uid, gid)) as cursor:
                     priv_row = await cursor.fetchone()
                 show_voice, show_text, show_fav = (bool(priv_row[0]), bool(priv_row[1]), bool(priv_row[2])) if priv_row else (True, True, True)
 
-                # Текстова статистика
                 if show_text:
-                    words_total = await stats_cog.get_text_words(uid, gid, "words_total")
-                    # додаємо те що ще не збережено в БД
-                    words_total += stats_cog._text_cache.get((uid, gid), 0)
-                    embed.add_field(name="✍️ Написано слів", value=f"**{words_total:,}**", inline=True)
+                    words = await stats_cog.get_text_words(uid, gid, "words_total")
+                    words += stats_cog._text_cache.get((uid, gid), 0)
+                    activity_stats += f"✍️ **Слів:** `{words:,}`\n"
                 
-                # Голосова статистика
                 if show_voice:
-                    voice_total_sec = await stats_cog.get_total_voice_time(uid, gid)
-                    
-                    # Перевіряємо поточну сесію
-                    session_start = stats_cog.voice_sessions.get((uid, gid))
-                    if session_start:
+                    v_sec = await stats_cog.get_total_voice_time(uid, gid)
+                    sess = stats_cog.voice_sessions.get((uid, gid))
+                    if sess:
                         import datetime
-                        voice_total_sec += int((datetime.datetime.now() - session_start).total_seconds())
-
-                    formatted_time = await stats_cog.format_time(voice_total_sec)
+                        v_sec += int((datetime.datetime.now() - sess).total_seconds())
                     
-                    fav_channel_str = ""
+                    time_str = await stats_cog.format_time(v_sec)
+                    activity_stats += f"🎙️ **Голос:** `{time_str}`"
+                    
                     if show_fav:
                         async with self.bot.db.execute('SELECT channel_id FROM voice_stats WHERE user_id = ? AND guild_id = ? ORDER BY total_time DESC LIMIT 1', (uid, gid)) as cursor:
                             fav_row = await cursor.fetchone()
                         if fav_row:
                             fav_ch = ctx.guild.get_channel(fav_row[0])
                             if fav_ch:
-                                fav_channel_str = f" (Улюблений: {fav_ch.name})"
-
-                    embed.add_field(name="🎙️ Час у голосі", value=f"**{formatted_time}**{fav_channel_str}", inline=True)
+                                activity_stats += f" \n📍 *{fav_ch.name}*"
 
         except Exception as e:
-            print(f"[Levels rank] Помилка завантаження додаткової статистики: {e}")
+            print(f"[Levels rank] Error: {e}")
+
+        if activity_stats:
+            embed.add_field(name="⚡ Активність", value=activity_stats, inline=True)
+
+        # Прогрес-бар
+        filled = int(progress * 12)
+        bar = "▰" * filled + "▱" * (12 - filled)
+        percent = int(progress * 100)
+        embed.add_field(name=f"🚀 Прогрес до {level+1} рівня — {percent}%", value=f"`{bar}`", inline=False)
         
-        # Простий прогрес-бар
-        progress = xp / next_level_xp
-        filled = int(progress * 10)
-        bar = "🟩" * filled + "⬛" * (10 - filled)
-        embed.add_field(name="Прогрес до наступного рівня", value=bar, inline=False)
-        
-        # Якщо вбудовані поля непарні, додаємо пусте для вирівнювання
-        if len(embed.fields) % 3 == 2:
-            embed.add_field(name="\u200b", value="\u200b", inline=True)
-            
+        embed.set_footer(text=f"ID: {uid} • Сьогодні ви чудові!")
         await ctx.send(embed=embed)
 
     @commands.command(name="top", aliases=["leaderboard", "лідери"], help="Список найактивніших учасників сервера")
