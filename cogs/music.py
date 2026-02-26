@@ -34,8 +34,8 @@ playlist_opts['extract_flat'] = True
 playlist_opts['noplaylist'] = False
 
 ffmpeg_opts = {
-    # Обмеження на використання ресурсів: 1 потік, відключення агресивного реконекту, який викликає 100% CPU loop
-    'before_options': '-nostdin -loglevel quiet -threads 1 -reconnect 1 -reconnect_at_eof 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32768',
+    # Оптимізовані параметри для стабільності стрімінгу
+    'before_options': '-nostdin -loglevel quiet -threads 1 -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2 -analyzeduration 0 -probesize 32768',
     'options': '-vn -threads 1',
 }
 
@@ -351,6 +351,12 @@ class Music(commands.Cog):
         self._audio_filter: dict[int, str] = {}   # {guild_id: 'none'/'bass'/'nightcore'/'slowed'}
         self.CACHE_TTL = 1800
 
+    def cog_unload(self):
+        """Зупиняємо всі фонові процеси при вивантаженні модуля."""
+        for task in self._progress_tasks.values():
+            task.cancel()
+        self._progress_tasks.clear()
+
     async def cog_check(self, ctx):
         """Перевірка для всіх команд у цьому когу: дозволено ТІЛЬКИ в голосових каналах."""
         if not ctx.guild:
@@ -479,7 +485,7 @@ class Music(commands.Cog):
         audio_filter = self._audio_filter.get(guild_id, 'none')
         filter_opts = AUDIO_FILTERS.get(audio_filter, AUDIO_FILTERS['none'])['options']
         seek_opts = {
-            'before_options': f'-nostdin -loglevel quiet -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {int(position)}',
+            'before_options': f'-nostdin -loglevel quiet -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2 -ss {int(position)}',
             'options': filter_opts,
         }
         vol = self._volume.get(guild_id, 50) / 100
@@ -634,7 +640,10 @@ class Music(commands.Cog):
             def after(error):
                 if error:
                     print(f'[Music] Playback error: {error}')
-                
+                    # При помилці видаляємо стрім з кешу, щоб наступна спроба була свіжою
+                    if song['url'] in self._stream_cache:
+                        del self._stream_cache[song['url']]
+
                 # Видаляємо програний трек з БД
                 asyncio.run_coroutine_threadsafe(
                     self.bot.db.execute(
@@ -648,11 +657,21 @@ class Music(commands.Cog):
                 if cur.get('seeking'):
                     cur['seeking'] = False
                     return
-                asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
+
+                # Якщо була помилка — чекаємо 3 секунди перед наступним треком, щоб не спамити логами/ресурсами
+                delay = 3 if error else 0
+                
+                async def play_next_delayed():
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    await self.play_next(ctx)
+
+                asyncio.run_coroutine_threadsafe(play_next_delayed(), self.bot.loop)
 
             ctx.voice_client.play(player, after=after)
             if hasattr(ctx.voice_client, 'encoder') and ctx.voice_client.encoder:
-                ctx.voice_client.encoder.set_bitrate(256)
+                # Встановлюємо 128kbps для стабільності (256 може перевантажувати канал/CPU)
+                ctx.voice_client.encoder.set_bitrate(128)
 
             # Оновлюємо статус бота
             await self.bot.change_presence(activity=discord.Activity(
