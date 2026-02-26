@@ -693,35 +693,11 @@ class Stats(commands.Cog):
                         xp_to_add = (total_blocks - awarded_blocks) * 3
                         self.voice_xp_blocks[key] = total_blocks
                         await levels_cog.add_xp(user_id, guild_id, xp_to_add, None)
-
             # 3. Перевіряємо чи ввімкнено Anti-AFK на сервері
             if not anti_afk_enabled: continue
             
-            channel = member.voice.channel
-            is_muted = member.voice.self_mute or member.voice.self_deaf
-            alone = len([m for m in channel.members if not m.bot]) == 1
-            
-            if alone:
-                if key not in self.afk_start_times:
-                    self.afk_start_times[key] = now
-                
-                afk_duration = (now - self.afk_start_times[key]).total_seconds()
-                limit = 3600 if not is_muted else 900 # 1 година або 15 хвилин
-                
-                if afk_duration >= limit:
-                    # Час вийшов, завершуємо сесію
-                    start_time = self.voice_sessions.pop(key, None)
-                    self.afk_start_times.pop(key, None)
-                    if start_time:
-                        await self.save_voice_session(user_id, guild_id, channel.id, start_time)
-                    
-                    try:
-                        await member.move_to(None, reason="Anti-AFK (ліміт перевищено)")
-                        await member.send(f"⚠️ Вас було від'єднано від голосового каналу `{channel.name}`, оскільки ви перебували там наодинці занадто довго.")
-                    except: pass
-            else:
-                # В каналі хтось є, скидаємо лічильник афк
-                self.afk_start_times.pop(key, None)
+            # Логіку автоматичного відключення (кіку) користувачів, коли вони самі,
+            # було прибрано за проханням користувача.
 
     @check_afk_task.before_loop
     async def before_check_afk(self):
