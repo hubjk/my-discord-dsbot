@@ -17,6 +17,10 @@ class AutoMod(commands.Cog):
         self.SPAM_LIMIT = 5 # 5 повідомлень
         self.SPAM_TIME = 3 # за 3 секунди
         
+        # Для Вертикального Спаму: { (user_id, channel_id): [(timestamp, char, message_id), ...] }
+        self.vertical_buffers = {}
+        self.VERTICAL_TIMEOUT = 5 # 5 секунд між буквами
+        
         # Список заблокованих слів (мат / нецензурна лексика)
         # Перевірка регістро-незалежна (.lower() застосовується до повідомлення)
         self.BANNED_WORDS = [
@@ -486,6 +490,79 @@ class AutoMod(commands.Cog):
                         await channel.send(embed=embed)
             else:
                 await message.channel.send(f"⚠️ Не вдалося замутити {message.author.mention}. У бота недостатньо прав.", delete_after=5)
+        # 4. ВЕРТИКАЛЬНИЙ СПАМ (літера за літерою)
+        # Якщо повідомлення складається з одного символу (крім емодзі/пунктуації)
+        clean_content = message.content.strip()
+        v_key = (user_id, message.channel.id)
+        
+        # Дозволяємо адмінам спамити якщо треба (опціонально)
+        if len(clean_content) == 1 and not is_admin:
+            msg_time = time.time()
+            if v_key not in self.vertical_buffers:
+                self.vertical_buffers[v_key] = []
+            
+            # Очищуємо старі записи в буфері
+            self.vertical_buffers[v_key] = [item for item in self.vertical_buffers[v_key] if msg_time - item[0] <= self.VERTICAL_TIMEOUT]
+            
+            # Додаємо поточну літеру
+            self.vertical_buffers[v_key].append((msg_time, clean_content, message.id))
+            
+            # Збираємо слово
+            sequence_text = "".join(item[1] for item in self.vertical_buffers[v_key])
+            if len(sequence_text) >= 2: # Мінімум 2 літери для перевірки
+                normalized_variants = self.normalize_text(sequence_text)
+                banned_words = await self.get_banned_words(gid)
+                banned_norms = self.get_banned_norms(banned_words)
+                white_words = await self.get_white_words(gid)
+                
+                is_bad = False
+                for _, norms_list in banned_norms:
+                    for wn in norms_list:
+                        for mv in normalized_variants:
+                            # Для вертикального спаму завжди вимагаємо startswith або повний збіг
+                            if len(wn) <= 3:
+                                match = (mv == wn)
+                            else:
+                                match = (mv == wn or mv.startswith(wn))
+                            
+                            if match:
+                                # Перевірка чи це не біле слово починається так само
+                                if any(mv == ww or mv.startswith(ww) for ww in white_words):
+                                    continue
+                                is_bad = True
+                                break
+                        if is_bad: break
+                    if is_bad: break
+
+                if is_bad:
+                    # Знайшли мат розбитий на частини!
+                    # Видаляємо всі повідомлення з буфера
+                    msg_ids = [item[2] for item in self.vertical_buffers[v_key]]
+                    self.vertical_buffers[v_key] = []
+                    
+                    for m_id in msg_ids:
+                        try:
+                            m = await message.channel.fetch_message(m_id)
+                            await m.delete()
+                        except: pass
+                    
+                    warning = await message.channel.send(f"⚠️ {message.author.mention}, не намагайтеся обійти фільтр, надсилаючи слова по одній літері!")
+                    await warning.delete(delay=5)
+                    
+                    # Логування
+                    audit_cog = self.bot.get_cog("Audit")
+                    if audit_cog:
+                        channel = await audit_cog.get_audit_channel(message.guild)
+                        if channel:
+                            embed = discord.Embed(title="🚫 Вертикальний спам", color=discord.Color.red())
+                            embed.add_field(name="Користувач", value=message.author.mention)
+                            embed.add_field(name="Слово", value=sequence_text)
+                            await channel.send(embed=embed)
+                    return
+        else:
+            # Якщо повідомлення довше за 1 символ — очищуємо буфер користувача в цьому каналі
+            if v_key in self.vertical_buffers:
+                del self.vertical_buffers[v_key]
 
     # ─── Заборонені слова (БД) ────────────────────────────────────────────────
 
