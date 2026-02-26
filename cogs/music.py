@@ -351,6 +351,20 @@ class Music(commands.Cog):
         self._audio_filter: dict[int, str] = {}   # {guild_id: 'none'/'bass'/'nightcore'/'slowed'}
         self.CACHE_TTL = 1800
 
+    async def cog_check(self, ctx):
+        """Перевірка для всіх команд у цьому когу: дозволено ТІЛЬКИ в голосових каналах."""
+        if not ctx.guild:
+            return False
+            
+        if ctx.channel.type != discord.ChannelType.voice:
+            try:
+                await ctx.message.delete(delay=0)
+            except Exception:
+                pass
+            await ctx.send("❌ Музичні команди можна використовувати **тільки у текстовому чаті голосового каналу**.", delete_after=10)
+            return False
+        return True
+
     def _lock(self, guild_id: int) -> asyncio.Lock:
         if guild_id not in self._play_lock:
             self._play_lock[guild_id] = asyncio.Lock()

@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import random
 import asyncio
 
@@ -19,55 +20,55 @@ class Games(commands.Cog):
             pass
         await self.bot.db.commit()
 
-    @commands.command(name="coinflip", aliases=["монетка", "cf"], help="Підкинути монетку на ставку (!cf <ставка>)")
-    async def coinflip(self, ctx, bet: int):
+    @app_commands.command(name="coinflip", description="Підкинути монетку на ставку")
+    async def coinflip(self, interaction: discord.Interaction, bet: int):
         if bet <= 0:
-            await ctx.send("❌ Ставка має бути більше нуля!")
+            await interaction.response.send_message("❌ Ставка має бути більше нуля!", ephemeral=True)
             return
             
-        balance = await self.get_balance(ctx.author.id, ctx.guild.id)
+        balance = await self.get_balance(interaction.user.id, interaction.guild_id)
         if balance < bet:
-            await ctx.send(f"💸 Недостатньо коштів! У вас лише {balance} 🪙.")
+            await interaction.response.send_message(f"💸 Недостатньо коштів! У вас лише {balance} 🪙.", ephemeral=True)
             return
 
         # Граємо
-        await ctx.send(f"🪙 {ctx.author.mention} підкидає монетку зі ставкою **{bet} 🪙**...")
+        await interaction.response.send_message(f"🪙 {interaction.user.mention} підкидає монетку зі ставкою **{bet} 🪙**...", ephemeral=True)
         await asyncio.sleep(1.5) # Невеличка інтрига
         
         outcome = random.choice(["win", "lose"])
         
         if outcome == "win":
             # У разі перемоги користувач отримує x2 своєї ставки (тобто чистий плюс дорівнює ставці)
-            await self.update_balance(ctx.author.id, ctx.guild.id, bet)
-            await ctx.send(f"🎉 Вітаємо! Випав Орел і ви виграли **{bet * 2} 🪙**! (Чистий прибуток: {bet})")
+            await self.update_balance(interaction.user.id, interaction.guild_id, bet)
+            await interaction.edit_original_response(content=f"🎉 Вітаємо! Випав Орел і ви виграли **{bet * 2} 🪙**! (Чистий прибуток: {bet})")
         else:
             # У разі поразки віднімаємо ставку
-            await self.update_balance(ctx.author.id, ctx.guild.id, -bet)
-            await ctx.send(f"💀 На жаль випала Решка. Ви програли свої **{bet} 🪙**. Спробуйте ще раз!")
+            await self.update_balance(interaction.user.id, interaction.guild_id, -bet)
+            await interaction.edit_original_response(content=f"💀 На жаль випала Решка. Ви програли свої **{bet} 🪙**. Спробуйте ще раз!")
 
-    @commands.command(name="slots", aliases=["казино", "слоти"], help="Зіграти в ігрові автомати (!slots <ставка>)")
-    async def slots(self, ctx, bet: int):
+    @app_commands.command(name="slots", description="Зіграти в ігрові автомати")
+    async def slots(self, interaction: discord.Interaction, bet: int):
         if bet <= 0:
-            await ctx.send("❌ Ставка має бути більше нуля!")
+            await interaction.response.send_message("❌ Ставка має бути більше нуля!", ephemeral=True)
             return
             
-        balance = await self.get_balance(ctx.author.id, ctx.guild.id)
+        balance = await self.get_balance(interaction.user.id, interaction.guild_id)
         if balance < bet:
-            await ctx.send(f"💸 Недостатньо коштів! У вас лише {balance} 🪙.")
+            await interaction.response.send_message(f"💸 Недостатньо коштів! У вас лише {balance} 🪙.", ephemeral=True)
             return
 
         emojis = ["🍎", "🍊", "🍇", "🍒", "💎", "7️⃣"]
         
-        # Анімація слотів
-        msg = await ctx.send("🎰 **Крутимо слоти...** 🎰\n[ ⬛ | ⬛ | ⬛ ]")
+        # Анімація слотів (ephemeral = True щоб не смітити в чат)
+        await interaction.response.send_message("🎰 **Крутимо слоти...** 🎰\n[ ⬛ | ⬛ | ⬛ ]", ephemeral=True)
         await asyncio.sleep(1)
         
         slot1 = random.choice(emojis)
-        await msg.edit(content=f"🎰 **Крутимо слоти...** 🎰\n[ {slot1} | ⬛ | ⬛ ]")
+        await interaction.edit_original_response(content=f"🎰 **Крутимо слоти...** 🎰\n[ {slot1} | ⬛ | ⬛ ]")
         await asyncio.sleep(1)
         
         slot2 = random.choice(emojis)
-        await msg.edit(content=f"🎰 **Крутимо слоти...** 🎰\n[ {slot1} | {slot2} | ⬛ ]")
+        await interaction.edit_original_response(content=f"🎰 **Крутимо слоти...** 🎰\n[ {slot1} | {slot2} | ⬛ ]")
         await asyncio.sleep(1)
         
         slot3 = random.choice(emojis)
@@ -76,23 +77,24 @@ class Games(commands.Cog):
         if slot1 == slot2 == slot3:
             # Джекпот x5
             winnings = bet * 5
-            await self.update_balance(ctx.author.id, ctx.guild.id, winnings - bet) # Чистий плюс
+            await self.update_balance(interaction.user.id, interaction.guild_id, winnings - bet) # Чистий плюс
             result_text = f"🎰 **ДЖЕКПОТ!!!** 🎰\n[ {slot1} | {slot2} | {slot3} ]\n\n💰 Ви виграли **{winnings} 🪙** (x5)!"
             color = discord.Color.gold()
         elif slot1 == slot2 or slot2 == slot3 or slot1 == slot3:
             # Дві однакові x2
             winnings = bet * 2
-            await self.update_balance(ctx.author.id, ctx.guild.id, winnings - bet)
+            await self.update_balance(interaction.user.id, interaction.guild_id, winnings - bet)
             result_text = f"🎰 **Перемога!** 🎰\n[ {slot1} | {slot2} | {slot3} ]\n\n💵 Ви виграли **{winnings} 🪙** (x2)."
             color = discord.Color.green()
         else:
             # Програш
-            await self.update_balance(ctx.author.id, ctx.guild.id, -bet)
+            await self.update_balance(interaction.user.id, interaction.guild_id, -bet)
             result_text = f"🎰 **Програш...** 🎰\n[ {slot1} | {slot2} | {slot3} ]\n\n💀 Ви програли **{bet} 🪙**."
             color = discord.Color.red()
 
         embed = discord.Embed(description=result_text, color=color)
-        await msg.edit(content=None, embed=embed)
+        # Очищуємо текст і замінюємо його красивим ембедом
+        await interaction.edit_original_response(content="", embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Games(bot))

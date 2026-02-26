@@ -146,6 +146,7 @@ class ServerManagementBot(commands.Bot):
                 anti_afk_enabled BOOLEAN DEFAULT 1,
                 speaker_role_id INTEGER,
                 writer_role_id INTEGER,
+                command_channel_id INTEGER,
                 last_weekly_reset TIMESTAMP,
                 last_monthly_reset TIMESTAMP,
                 last_yearly_reset TIMESTAMP
@@ -159,7 +160,8 @@ class ServerManagementBot(commands.Bot):
             ("dynamic_roles_enabled", "0"),
             ("anti_afk_enabled", "1"),
             ("speaker_role_id", "NULL"),
-            ("writer_role_id", "NULL")
+            ("writer_role_id", "NULL"),
+            ("command_channel_id", "NULL")
         ]:
             try:
                 await self.db.execute(f'ALTER TABLE server_settings ADD COLUMN {col} INTEGER DEFAULT {default}')
@@ -276,6 +278,37 @@ class ServerManagementBot(commands.Bot):
         await self.process_commands(message)
 
 bot = ServerManagementBot()
+
+@bot.check
+async def global_command_channel_check(ctx):
+    # Дозволяємо в ПП
+    if not ctx.guild:
+        return True
+
+    # Музичні команди мають своє власне обмеження (лише голосові канали)
+    music_commands = ["join", "play", "skip", "pause", "resume", "queue", "history", "cq", "volume", "stop"]
+    
+    # getattr безпечний, якщо ctx.command == None (що буває, якщо команда не знайдена)
+    cmd_name = getattr(ctx.command, "name", "")
+    if cmd_name in music_commands:
+        return True
+
+    async with bot.db.execute('SELECT command_channel_id FROM server_settings WHERE guild_id = ?', (ctx.guild.id,)) as cursor:
+        row = await cursor.fetchone()
+
+    if row and row[0]:
+        cmd_channel_id = row[0]
+        # set_command_channel - це слеш-команда, але на всяк випадок перевірку на ім'я залишаємо
+        if ctx.channel.id != cmd_channel_id:
+            try:
+                await ctx.message.delete(delay=0)
+            except Exception:
+                pass
+            await ctx.send(f"❌ Команди бота можна використовувати лише в <#{cmd_channel_id}>.", delete_after=5)
+            # Повертаємо False щоб скасувати виконання команди
+            return False
+
+    return True
 
 if __name__ == '__main__':
     if not TOKEN or TOKEN == "your_bot_token_here":
