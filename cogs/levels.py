@@ -7,7 +7,7 @@ class Levels(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.cooldowns: dict[int, float] = {}
-        self.COOLDOWN_TIME = 60 # Кулдаун між нарахуваннями досвіду (в секундах) - Збільшено для запобігання спаму
+        self.COOLDOWN_TIME = 4 # Кулдаун між нарахуваннями досвіду (в секундах) - Збільшено для запобігання спаму
         
         # In-memory cache для зменшення кількості запитів до БД
         self._xp_cache: dict[tuple[int, int], int] = {}    # {(user_id, guild_id): xp}
