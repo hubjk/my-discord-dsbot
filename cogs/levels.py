@@ -7,7 +7,7 @@ class Levels(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.cooldowns: dict[int, float] = {}
-        self.COOLDOWN_TIME = 5 # Кулдаун між нарахуваннями досвіду (в секундах)
+        self.COOLDOWN_TIME = 60 # Кулдаун між нарахуваннями досвіду (в секундах) - Збільшено для запобігання спаму
         
         # In-memory cache для зменшення кількості запитів до БД
         self._xp_cache: dict[tuple[int, int], int] = {}    # {(user_id, guild_id): xp}
@@ -143,9 +143,12 @@ class Levels(commands.Cog):
         
         # Перевіряємо кулдаун (Анти-фарм)
         last_msg_time = self.cooldowns.get(user_id, 0)
+        
+        # Якщо з минулого повідомлення пройшло менше часу ніж ліміт - ігноруємо
         if current_time - last_msg_time < self.COOLDOWN_TIME:
             return
             
+        # Оновлюємо час ТІЛЬКИ ЯКЩО користувач пройшов перевірку (отримує XP)
         self.cooldowns[user_id] = current_time
         
         # Отримуємо поточний досвід
