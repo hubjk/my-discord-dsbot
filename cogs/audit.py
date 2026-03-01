@@ -31,6 +31,10 @@ class Audit(commands.Cog):
         if message.content.startswith('!'):
             return
             
+        # Ігноруємо видалення гіфок
+        if "tenor.com/view/" in message.content or "giphy.com/" in message.content:
+            return
+            
         channel = await self.get_audit_channel(message.guild)
         if not channel:
             return
@@ -55,6 +59,10 @@ class Audit(commands.Cog):
             return
         # Ігноруємо редагування команд бота (починаються з !)
         if after.content.startswith('!'):
+            return
+            
+        # Ігноруємо автоматичні зміни гіфок алгоритмами діскорду
+        if "tenor.com/view/" in before.content or "giphy.com/" in before.content:
             return
             
         channel = await self.get_audit_channel(before.guild)

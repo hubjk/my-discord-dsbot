@@ -452,30 +452,34 @@ class AutoMod(commands.Cog):
 
         # 1. АНТИ-ЛІНК (Заборона посилань) — не для адмінів та учасників з рівнем 2+
         if not is_admin and self.link_regex.search(message.content):
-            # Перевіряємо рівень користувача
-            allow_links = False
-            levels_cog = self.bot.get_cog("Levels")
-            if levels_cog:
-                try:
-                    xp = await levels_cog.get_user_xp(message.author.id, gid)
-                    level = levels_cog.calculate_level(xp)
-                    if level >= 2:
-                        allow_links = True
-                except Exception:
-                    pass
-
-            if not allow_links:
-                await message.delete()
-                warning = await message.channel.send(f"⚠️ {message.author.mention}, надсилати посилання можуть лише учасники з **2 рівня** і вище!")
-                await warning.delete(delay=5)
-                audit_cog = self.bot.get_cog("Audit")
-                if audit_cog:
-                    channel = await audit_cog.get_audit_channel(message.guild)
-                    if channel:
-                        embed = discord.Embed(title="🔗 Знайдено посилання", description=f"{message.author.mention} намагався надіслати посилання в {message.channel.mention}", color=discord.Color.red())
-                        embed.add_field(name="Вміст", value=message.content[:500])
-                        await channel.send(embed=embed)
-                return
+            # Пропускаємо гіфки з Tenor/Giphy
+            if "tenor.com/view/" in message.content or "giphy.com/" in message.content:
+                pass
+            else:
+                # Перевіряємо рівень користувача
+                allow_links = False
+                levels_cog = self.bot.get_cog("Levels")
+                if levels_cog:
+                    try:
+                        xp = await levels_cog.get_user_xp(message.author.id, gid)
+                        level = levels_cog.calculate_level(xp)
+                        if level >= 2:
+                            allow_links = True
+                    except Exception:
+                        pass
+    
+                if not allow_links:
+                    await message.delete()
+                    warning = await message.channel.send(f"⚠️ {message.author.mention}, надсилати посилання можуть лише учасники з **2 рівня** і вище!")
+                    await warning.delete(delay=5)
+                    audit_cog = self.bot.get_cog("Audit")
+                    if audit_cog:
+                        channel = await audit_cog.get_audit_channel(message.guild)
+                        if channel:
+                            embed = discord.Embed(title="🔗 Знайдено посилання", description=f"{message.author.mention} намагався надіслати посилання в {message.channel.mention}", color=discord.Color.red())
+                            embed.add_field(name="Вміст", value=message.content[:500])
+                            await channel.send(embed=embed)
+                    return
 
         # 2. ФІЛЬТР МАТУ (Заблоковані слова)
         # Пропускаємо виключені канали
