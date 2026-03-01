@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import re
 import time
+import asyncio
 from datetime import timedelta
 
 class AutoMod(commands.Cog):
@@ -20,6 +21,12 @@ class AutoMod(commands.Cog):
         # Для Вертикального Спаму: { (user_id, channel_id): [(timestamp, char, message_id), ...] }
         self.vertical_buffers = {}
         self.VERTICAL_TIMEOUT = 5 # 5 секунд між буквами
+        
+        # Накопичувальні покарання: { (guild_id, user_id): { 'profanity': 0, 'spam': 0, 'last': 0, 'abuser': False } }
+        self.p_stats = {}
+        
+        # Прапорець для запобігання повторному запуску скану при реконектах
+        self._startup_checked = False
         
         # Список заблокованих слів (мат / нецензурна лексика)
         # Перевірка регістро-незалежна (.lower() застосовується до повідомлення)
@@ -110,7 +117,7 @@ class AutoMod(commands.Cog):
             "тупий", "тупорил",
 
             # === ПІЗДОБРАТІЯ / ЄБАНАТ ===
-            "єбанат", "їбанат", "йобанат",
+            "уєбан", "уебан", "єбанат", "їбанат", "йобанат",
             "єбанько", "йобаний рот",
             "залупоголовий",
 
@@ -278,6 +285,162 @@ class AutoMod(commands.Cog):
         except discord.Forbidden:
             return False
 
+    async def _apply_punishment(self, message, violation_type) -> str:
+        """
+        Застосовує покарання на основі типу порушення та історії користувача.
+        violation_type: 'profanity' або 'spam'
+        Повертає рядок з описом покарання.
+        """
+        user_id = message.author.id
+        gid = message.guild.id
+        key = (gid, user_id)
+        now = time.time()
+        
+        # Ініціалізація або скидання за таймером
+        if key not in self.p_stats:
+            self.p_stats[key] = {'profanity': 0, 'spam': 0, 'last': 0.0, 'abuser': False}
+        
+        stats = self.p_stats[key]
+        reset_time = 3600.0 if stats['abuser'] else 1800.0 # 60хв або 30хв
+        
+        last_t = float(stats['last'])
+        if now - last_t > reset_time:
+            stats['profanity'] = 0
+            stats['spam'] = 0
+            # abuser залишається True поки не мине година очищення
+        
+        stats['last'] = now
+        
+        if violation_type == 'profanity':
+            stats['profanity'] += 1
+            count = stats['profanity']
+            
+            if count <= 3:
+                # Просто попередження (Embed з цензурою вже відправлений в on_message)
+                return f"Попередження ({count}/3)"
+            
+            # Рівні муту для мату (починаючи з 4-го разу)
+            level = count - 3
+            if level == 1:
+                duration, d_str = 1, "1 хвилину"
+            elif level == 2:
+                duration, d_str = 5, "5 хвилин"
+            else:
+                duration, d_str = 10, "10 хвилин"
+                stats['abuser'] = True # Мітка зловмисника
+            
+            success = await self.timeout_user(message.author, f"Мат (Порушення #{count})", duration)
+            if success:
+                return f"Мут на {d_str} (Порушення #{count})"
+            return f"Попередження (Бот не зміг замутити)"
+
+        elif violation_type == 'spam':
+            stats['spam'] += 1
+            count = stats['spam']
+            
+            if count == 1:
+                return "Попередження (1/1)"
+            
+            # Рівні муту для спаму (починаючи з 2-го разу)
+            level = count - 1
+            if level == 1:
+                duration, d_str = 1, "1 хвилину"
+            elif level == 2:
+                duration, d_str = 5, "5 хвилин"
+            else:
+                duration, d_str = 10, "10 хвилин"
+                stats['abuser'] = True
+            
+            success = await self.timeout_user(message.author, f"Спам (Порушення #{count})", duration)
+            if success:
+                return f"Мут на {d_str} (Порушення #{count})"
+            return f"Попередження (Бот не зміг замутити)"
+        
+        return "Попередження"
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if not self._startup_checked:
+            self._startup_checked = True
+            self.bot.loop.create_task(self.quiet_profanity_scan())
+
+    async def quiet_profanity_scan(self):
+        await asyncio.sleep(10)
+        print("[AutoMod] Запуск тихої перевірки чатів на мати...")
+        for guild in self.bot.guilds:
+            try:
+                banned_words = await self.get_banned_words(guild.id)
+                if not banned_words:
+                    continue
+                banned_norms = self.get_banned_norms(banned_words)
+                white_words = await self.get_white_words(guild.id)
+                
+                for channel in guild.text_channels:
+                    if await self.is_excluded_channel(channel.id, guild.id):
+                        continue
+                    
+                    try:
+                        async for msg in channel.history(limit=50):
+                            if msg.author.bot or not msg.content:
+                                continue
+                            
+                            found_words = self._get_profanity_words(msg.content, banned_norms, white_words)
+                            if found_words:
+                                await msg.delete()
+                                await asyncio.sleep(1.0) # Для захисту від rate limits (1с)
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+            except Exception as e:
+                print(f"[AutoMod] Помилка тихої перевірки сервера {guild.id}: {e}")
+        print("[AutoMod] Тиха перевірка чатів завершена.")
+
+    def _get_profanity_words(self, content: str, banned_norms: list, white_words: list) -> list:
+        """Повертає список знайдених матюків у тексті, або порожній список якщо текст чистий."""
+        text_without_urls = re.sub(r'https?://\S+', '', content)
+        message_words = re.split(r'\s+', text_without_urls.strip())
+        found_words = []
+        
+        for msg_word in message_words:
+            if not msg_word or re.match(r'^https?://', msg_word):
+                continue
+            stripped = re.sub(r'^[^\w\u0400-\u04ff]+|[^\w\u0400-\u04ff]+$', '', msg_word)
+            if not stripped:
+                continue
+            
+            if stripped.lower() in white_words:
+                continue
+
+            word_variants = self.normalize_text(stripped)
+            
+            is_whitelisted = False
+            for wv in word_variants:
+                for ww in white_words:
+                    if not ww: continue
+                    if wv == ww or wv.startswith(ww):
+                        is_whitelisted = True
+                        break
+                if is_whitelisted:
+                    break
+            if is_whitelisted:
+                continue
+
+            for orig_word, ban_variants in banned_norms:
+                if orig_word in found_words:
+                    continue
+                for wn in ban_variants:
+                    for wv in word_variants:
+                        if len(wn) <= 3:
+                            is_match = (wv == wn)
+                        else:
+                            is_match = (wn in wv)
+
+                        if is_match:
+                            found_words.append(orig_word)
+                            break
+                    if orig_word in found_words:
+                        break
+        return found_words
+
     @commands.Cog.listener()
     async def on_message(self, message):
         # Ігноруємо приватні повідомлення та ботів
@@ -331,50 +494,8 @@ class AutoMod(commands.Cog):
                 
                 banned_norms = self.get_banned_norms(banned_words)
                 white_words = await self.get_white_words(gid)
-                found_words = []
                 
-                for msg_word in message_words:
-                    if not msg_word or re.match(r'^https?://', msg_word):
-                        continue
-                    # Прибираємо пунктуацію з країв слова
-                    stripped = re.sub(r'^[^\w\u0400-\u04ff]+|[^\w\u0400-\u04ff]+$', '', msg_word)
-                    if not stripped:
-                        continue
-                    
-                    # Перевірка білого списку
-                    if stripped.lower() in white_words:
-                        continue
-
-                    word_variants = self.normalize_text(stripped)
-                    
-                    is_whitelisted = False
-                    for wv in word_variants:
-                        # Перевірка на повний збіг або якщо біле слово є ПРІФІКСОМ (наприклад 'херсон' для 'херсонський')
-                        if any(wv == ww or wv.startswith(ww) for ww in white_words):
-                            is_whitelisted = True
-                            break
-                    if is_whitelisted:
-                        continue
-
-                    for orig_word, ban_variants in banned_norms:
-                        if orig_word in found_words:
-                            continue
-                        for wn in ban_variants:
-                            for wv in word_variants:
-                                # М'яка логіка:
-                                # Якщо корінь мату дуже короткий (≤3 симвови), вимагаємо ПОВНОГО збігу.
-                                # Це захистить від "херсон" (корінь "хер"), "команда" (корінь "манда")
-                                if len(wn) <= 3:
-                                    is_match = (wv == wn)
-                                else:
-                                    # Для довших коренів залишаємо startswith (напр. "пізд" -> "піздець")
-                                    is_match = (wv == wn or wv.startswith(wn))
-
-                                if is_match:
-                                    found_words.append(orig_word)
-                                    break
-                            if orig_word in found_words:
-                                break
+                found_words = self._get_profanity_words(message.content, banned_norms, white_words)
 
                 if found_words:
                     original_content = message.content
@@ -408,7 +529,14 @@ class AutoMod(commands.Cog):
                         token_norms = self.normalize_text(stripped)
                         
                         # Перевірка білого списку для токена
-                        is_white = stripped.lower() in white_words or any(tn in white_words for tn in token_norms)
+                        is_white = False
+                        if stripped.lower() in white_words:
+                            is_white = True
+                        else:
+                            for tn in token_norms:
+                                if tn in white_words:
+                                    is_white = True
+                                    break
                         
                         if is_white:
                             is_bad = False
@@ -420,7 +548,7 @@ class AutoMod(commands.Cog):
                                         if len(wn) <= 3:
                                             match = (mv == wn)
                                         else:
-                                            match = (mv == wn or mv.startswith(wn))
+                                            match = (wn in mv)
                                         
                                         if match:
                                             is_bad = True
@@ -444,7 +572,9 @@ class AutoMod(commands.Cog):
                         name=message.author.display_name,
                         icon_url=message.author.display_avatar.url if message.author.display_avatar else None
                     )
-                    embed.set_footer(text="⚠️ Повідомлення відредаговано автомодератором")
+                    # --- Застосування покарання ---
+                    p_msg = await self._apply_punishment(message, 'profanity')
+                    embed.set_footer(text=f"⚠️ {p_msg}")
                     await message.channel.send(embed=embed)
 
                     # --- Логування в audit ---
@@ -479,17 +609,20 @@ class AutoMod(commands.Cog):
         if len(self.user_messages[user_id]) >= self.SPAM_LIMIT:
             self.user_messages[user_id] = []
             await message.delete()
-            success = await self.timeout_user(message.author, "Авто-модератор: Спам повідомленнями", 5)
-            if success:
-                await message.channel.send(f"🤫 {message.author.mention} отримав мут на 5 хвилин за спам.", delete_after=10)
-                audit_cog = self.bot.get_cog("Audit")
-                if audit_cog:
-                    channel = await audit_cog.get_audit_channel(message.guild)
-                    if channel:
-                        embed = discord.Embed(title="⏱️ Користувач замучений (Спам)", description=f"{message.author.mention} відправив більше {self.SPAM_LIMIT} повідомлень за {self.SPAM_TIME} секунд.", color=discord.Color.orange())
-                        await channel.send(embed=embed)
+            
+            p_msg = await self._apply_punishment(message, 'spam')
+            
+            if "Мут" in p_msg:
+                await message.channel.send(f"🤫 {message.author.mention} отримав **{p_msg}** за спам.", delete_after=10)
             else:
-                await message.channel.send(f"⚠️ Не вдалося замутити {message.author.mention}. У бота недостатньо прав.", delete_after=5)
+                await message.channel.send(f"⚠️ {message.author.mention}, припиніть спамити! Наступного разу буде мут.", delete_after=10)
+
+            audit_cog = self.bot.get_cog("Audit")
+            if audit_cog:
+                channel = await audit_cog.get_audit_channel(message.guild)
+                if channel:
+                    embed = discord.Embed(title="🚫 Анти-спам спрацював", description=f"{message.author.mention} спамив. Покарання: **{p_msg}**", color=discord.Color.orange())
+                    await channel.send(embed=embed)
         # 4. ВЕРТИКАЛЬНИЙ СПАМ (літера за літерою)
         # Якщо повідомлення складається з одного символу (крім емодзі/пунктуації)
         clean_content = message.content.strip()
@@ -527,7 +660,13 @@ class AutoMod(commands.Cog):
                             
                             if match:
                                 # Перевірка чи це не біле слово починається так само
-                                if any(mv == ww or mv.startswith(ww) for ww in white_words):
+                                is_w = False
+                                for ww in white_words:
+                                    if not ww: continue
+                                    if mv == ww or mv.startswith(ww):
+                                        is_w = True
+                                        break
+                                if is_w:
                                     continue
                                 is_bad = True
                                 break
@@ -546,8 +685,11 @@ class AutoMod(commands.Cog):
                             await m.delete()
                         except: pass
                     
-                    warning = await message.channel.send(f"⚠️ {message.author.mention}, не намагайтеся обійти фільтр, надсилаючи слова по одній літері!")
-                    await warning.delete(delay=5)
+                    # Застосовуємо систему покарань (як для мату)
+                    p_msg = await self._apply_punishment(message, 'profanity')
+                    
+                    warning_text = f"⚠️ {message.author.mention}, не намагайтеся обійти фільтр! **{p_msg}**"
+                    await message.channel.send(warning_text, delete_after=10)
                     
                     # Логування
                     audit_cog = self.bot.get_cog("Audit")
@@ -556,7 +698,8 @@ class AutoMod(commands.Cog):
                         if channel:
                             embed = discord.Embed(title="🚫 Вертикальний спам", color=discord.Color.red())
                             embed.add_field(name="Користувач", value=message.author.mention)
-                            embed.add_field(name="Слово", value=sequence_text)
+                            embed.add_field(name="Слово", value=f"`{sequence_text}`")
+                            embed.add_field(name="Покарання", value=p_msg)
                             await channel.send(embed=embed)
                     return
         else:

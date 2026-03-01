@@ -16,19 +16,27 @@ class Games(commands.Cog):
 
     async def update_balance(self, user_id, guild_id, amount):
         # Хелпер для зміни балансу (+ чи -)
-        async with self.bot.db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (amount, user_id, guild_id)):
-            pass
+        await self.bot.db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (amount, user_id, guild_id))
         await self.bot.db.commit()
 
-    @app_commands.command(name="coinflip", description="Підкинути монетку на ставку")
-    async def coinflip(self, interaction: discord.Interaction, bet: int):
+    async def place_bet(self, interaction: discord.Interaction, bet: int) -> bool:
+        """Перевіряє і знімає ставку перед початком гри. Повертає True, якщо успішно."""
         if bet <= 0:
             await interaction.response.send_message("❌ Ставка має бути більше нуля!", ephemeral=True)
-            return
+            return False
             
         balance = await self.get_balance(interaction.user.id, interaction.guild_id)
         if balance < bet:
             await interaction.response.send_message(f"💸 Недостатньо коштів! У вас лише {balance} 🪙.", ephemeral=True)
+            return False
+            
+        # Одразу знімаємо ставку, щоб запобігти абузам, коли юзер швидко вводить кілька команд
+        await self.update_balance(interaction.user.id, interaction.guild_id, -bet)
+        return True
+
+    @app_commands.command(name="coinflip", description="Підкинути монетку на ставку")
+    async def coinflip(self, interaction: discord.Interaction, bet: int):
+        if not await self.place_bet(interaction, bet):
             return
 
         # Граємо
@@ -38,23 +46,16 @@ class Games(commands.Cog):
         outcome = random.choice(["win", "lose"])
         
         if outcome == "win":
-            # У разі перемоги користувач отримує x2 своєї ставки (тобто чистий плюс дорівнює ставці)
-            await self.update_balance(interaction.user.id, interaction.guild_id, bet)
+            # Ставку вже було знято, тому для виграшу x2 додаємо `bet * 2`
+            await self.update_balance(interaction.user.id, interaction.guild_id, bet * 2)
             await interaction.edit_original_response(content=f"🎉 Вітаємо! Випав Орел і ви виграли **{bet * 2} 🪙**! (Чистий прибуток: {bet})")
         else:
-            # У разі поразки віднімаємо ставку
-            await self.update_balance(interaction.user.id, interaction.guild_id, -bet)
+            # При програші нічого не віднімаємо, бо ставку вже зняли
             await interaction.edit_original_response(content=f"💀 На жаль випала Решка. Ви програли свої **{bet} 🪙**. Спробуйте ще раз!")
 
     @app_commands.command(name="slots", description="Зіграти в ігрові автомати")
     async def slots(self, interaction: discord.Interaction, bet: int):
-        if bet <= 0:
-            await interaction.response.send_message("❌ Ставка має бути більше нуля!", ephemeral=True)
-            return
-            
-        balance = await self.get_balance(interaction.user.id, interaction.guild_id)
-        if balance < bet:
-            await interaction.response.send_message(f"💸 Недостатньо коштів! У вас лише {balance} 🪙.", ephemeral=True)
+        if not await self.place_bet(interaction, bet):
             return
 
         emojis = ["🍎", "🍊", "🍇", "🍒", "💎", "7️⃣"]
@@ -77,18 +78,17 @@ class Games(commands.Cog):
         if slot1 == slot2 == slot3:
             # Джекпот x5
             winnings = bet * 5
-            await self.update_balance(interaction.user.id, interaction.guild_id, winnings - bet) # Чистий плюс
+            await self.update_balance(interaction.user.id, interaction.guild_id, winnings)
             result_text = f"🎰 **ДЖЕКПОТ!!!** 🎰\n[ {slot1} | {slot2} | {slot3} ]\n\n💰 Ви виграли **{winnings} 🪙** (x5)!"
             color = discord.Color.gold()
         elif slot1 == slot2 or slot2 == slot3 or slot1 == slot3:
             # Дві однакові x2
             winnings = bet * 2
-            await self.update_balance(interaction.user.id, interaction.guild_id, winnings - bet)
+            await self.update_balance(interaction.user.id, interaction.guild_id, winnings)
             result_text = f"🎰 **Перемога!** 🎰\n[ {slot1} | {slot2} | {slot3} ]\n\n💵 Ви виграли **{winnings} 🪙** (x2)."
             color = discord.Color.green()
         else:
-            # Програш
-            await self.update_balance(interaction.user.id, interaction.guild_id, -bet)
+            # Програш (ставку вже знято на початку)
             result_text = f"🎰 **Програш...** 🎰\n[ {slot1} | {slot2} | {slot3} ]\n\n💀 Ви програли **{bet} 🪙**."
             color = discord.Color.red()
 

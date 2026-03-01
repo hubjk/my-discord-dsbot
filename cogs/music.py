@@ -285,10 +285,11 @@ class PlayerView(discord.ui.View):
         button.emoji = LOOP_EMOJIS[new_mode]
         label = LOOP_LABELS[new_mode]
         await interaction.response.send_message(f"Петля: **{label}**", ephemeral=True, delete_after=3)
-        try:
-            await self.message.edit(embed=self.build_embed(), view=self)
-        except Exception:
-            pass
+        if self.message:
+            try:
+                await self.message.edit(embed=self.build_embed(), view=self)
+            except Exception:
+                pass
 
     @discord.ui.button(emoji="🎧", style=discord.ButtonStyle.secondary, row=1)
     async def filter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -304,10 +305,11 @@ class PlayerView(discord.ui.View):
         # Перезапускаємо з новим фільтром
         pos = self.cog._get_position(gid)
         await self.cog._seek_to(self.ctx, gid, pos)
-        try:
-            await self.message.edit(embed=self.build_embed(), view=self)
-        except Exception:
-            pass
+        if self.message:
+            try:
+                await self.message.edit(embed=self.build_embed(), view=self)
+            except Exception:
+                pass
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=1)
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -518,7 +520,7 @@ class Music(commands.Cog):
             if time.time() - ts < self.CACHE_TTL:
                 return stream_url, title, duration
             else:
-                del self._stream_cache[url]
+                self._stream_cache.pop(url, None)
 
         data = await self.bot.loop.run_in_executor(
             None, lambda: ytdl.extract_info(url, download=False)
