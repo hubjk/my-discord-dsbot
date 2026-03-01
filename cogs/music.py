@@ -34,9 +34,9 @@ playlist_opts['extract_flat'] = True
 playlist_opts['noplaylist'] = False
 
 ffmpeg_opts = {
-    # Оптимізовані параметри для стабільності стрімінгу
-    'before_options': '-nostdin -loglevel quiet -threads 1 -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2 -analyzeduration 0 -probesize 32768',
-    'options': '-vn -threads 1',
+    # Оптимізовані параметри для найвищої якості аудіо та стабільного стрімінгу
+    'before_options': '-nostdin -loglevel quiet -threads 0 -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 100M',
+    'options': '-vn -b:a 320k -threads 0',
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_opts)
@@ -672,8 +672,8 @@ class Music(commands.Cog):
 
             ctx.voice_client.play(player, after=after)
             if hasattr(ctx.voice_client, 'encoder') and ctx.voice_client.encoder:
-                # Встановлюємо 128kbps для стабільності (256 може перевантажувати канал/CPU)
-                ctx.voice_client.encoder.set_bitrate(128)
+                # Встановлюємо максимальний бітрейт (384 kbps) для кращої якості звуку (раніше було 128)
+                ctx.voice_client.encoder.set_bitrate(384)
 
             # Оновлюємо статус бота
             await self.bot.change_presence(activity=discord.Activity(
