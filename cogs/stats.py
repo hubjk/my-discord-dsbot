@@ -246,17 +246,25 @@ class Stats(commands.Cog):
         await self.bot.db.commit()
         await ctx.send(f"✅ Канал для підсумків активності встановлено на {channel.mention}.")
 
-    @commands.command(name="force_summary", help="Примусово показати підсумок для перевірки (тільки для адмінів). Варіанти: week, month, year, all")
-    @commands.check(is_admin)
-    async def force_summary(self, ctx, period: str = None):
-        if period not in ["week", "month", "year", "all"]:
-            return await ctx.send("❌ Будь ласка, вкажіть період: `week`, `month`, `year` або `all`.")
+    @app_commands.command(name="force_summary", description="Примусово показати підсумок для перевірки (тільки для адмінів)")
+    @app_commands.describe(period="Оберіть період для підсумку")
+    @app_commands.choices(period=[
+        app_commands.Choice(name="Тиждень", value="week"),
+        app_commands.Choice(name="Місяць", value="month"),
+        app_commands.Choice(name="Рік", value="year"),
+        app_commands.Choice(name="Всі періоди", value="all"),
+    ])
+    async def force_summary(self, interaction: discord.Interaction, period: app_commands.Choice[str]):
+        if not await is_admin(interaction):
+            return await interaction.response.send_message("❌ У вас немає прав для використання цієї команди.", ephemeral=True)
+            
+        period_val = period.value
         
-        async with self.bot.db.execute('SELECT summary_channel_id FROM server_settings WHERE guild_id = ?', (ctx.guild.id,)) as cursor:
+        async with self.bot.db.execute('SELECT summary_channel_id FROM server_settings WHERE guild_id = ?', (interaction.guild.id,)) as cursor:
             row = await cursor.fetchone()
             
         channel_id = row[0] if row else None
-        channel = ctx.guild.get_channel(channel_id) if channel_id else ctx.channel
+        channel = interaction.guild.get_channel(channel_id) if channel_id else interaction.channel
         
         period_map = {
             "week": ("week", "тиждень", "words_week", "words_week = 0"),
@@ -264,12 +272,12 @@ class Stats(commands.Cog):
             "year": ("year", "рік", "words_year", "words_year = 0")
         }
         
-        periods_to_run = ["week", "month", "year"] if period == "all" else [period]
+        periods_to_run = ["week", "month", "year"] if period_val == "all" else [period_val]
         
-        await ctx.send(f"🛠️ **Тестовий режим відображення підсумків.** Дані не будуть видалені, архів не створюється.")
+        await interaction.response.send_message(f"🛠️ **Тестовий режим відображення підсумків.** Дані не будуть видалені, архів не створюється.", ephemeral=True)
         for p in periods_to_run:
             ptype, pname, tcol, rquery = period_map[p]
-            await self.post_summary(ctx.guild, channel, ptype, pname, tcol, rquery, is_test=True)
+            await self.post_summary(interaction.guild, channel, ptype, pname, tcol, rquery, is_test=True)
             import asyncio
             await asyncio.sleep(2)
 
