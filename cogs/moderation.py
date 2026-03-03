@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import re
 from datetime import timedelta
@@ -99,19 +100,22 @@ class Moderation(commands.Cog):
                 print(f"[Moderation] Не вдалося створити/налаштувати роль Muted: {e}")
         return role
 
-    @commands.command(name="timeout", aliases=["mute", "мут"], help="Замутити учасника (через роль)")
-    @commands.has_permissions(moderate_members=True)
-    async def timeout(self, ctx, member: discord.Member, duration: str = "10m", *, reason="Не вказано"):
-        if member == ctx.author:
-            return await ctx.send("❌ Ви не можете замутити самого себе!")
+    @app_commands.command(name="mute", description="Замутити учасника (через роль)")
+    @app_commands.describe(member="Користувач для муту", duration="Час (напр. 10m, 1h, 1d)", reason="Причина муту")
+    async def timeout(self, interaction: discord.Interaction, member: discord.Member, duration: str = "10m", reason: str = "Не вказано"):
+        if not interaction.user.guild_permissions.moderate_members:
+            return await interaction.response.send_message("❌ У вас немає прав для використання цієї команди.", ephemeral=True)
+            
+        if member == interaction.user:
+            return await interaction.response.send_message("❌ Ви не можете замутити самого себе!", ephemeral=True)
         
         seconds = self.parse_duration(duration)
         if seconds is None:
-            return await ctx.send("❌ Неправильний формат часу! Використовуйте: `10m`, `1h`, `1d` тощо.")
+            return await interaction.response.send_message("❌ Неправильний формат часу! Використовуйте: `10m`, `1h`, `1d` тощо.", ephemeral=True)
         
-        role = await self.get_or_create_mute_role(ctx.guild)
+        role = await self.get_or_create_mute_role(interaction.guild)
         if not role:
-            return await ctx.send("❌ Не вдалося знайти або створити роль Muted. Перевірте права бота.")
+            return await interaction.response.send_message("❌ Не вдалося знайти або створити роль Muted. Перевірте права бота.", ephemeral=True)
 
         try:
             # Знімаємо системний тайм-аут, якщо він є (на всяк випадок)
@@ -126,14 +130,14 @@ class Moderation(commands.Cog):
             embed.add_field(name="Тривалість", value=duration, inline=True)
             embed.add_field(name="Причина", value=reason, inline=False)
             embed.set_footer(text="Тепер мут працює через роль (дозволяє писати в тікетах).")
-            await ctx.send(embed=embed)
+            await interaction.response.send_message(embed=embed)
             
             import asyncio
             self.bot.loop.create_task(self.unmute_timer(member, role, seconds))
         except discord.Forbidden:
-            await ctx.send("❌ Недостатньо прав для муту цього учасника (роль бота нижча).")
+            await interaction.response.send_message("❌ Недостатньо прав для муту цього учасника (роль бота нижча).", ephemeral=True)
         except Exception as e:
-            await ctx.send(f"❌ Сталася помилка: {e}")
+            await interaction.response.send_message(f"❌ Сталася помилка: {e}", ephemeral=True)
 
     async def unmute_timer(self, member: discord.Member, role: discord.Role, seconds: int):
         import asyncio
@@ -144,16 +148,19 @@ class Moderation(commands.Cog):
             except:
                 pass
 
-    @commands.command(name="untimeout", aliases=["unmute", "розмут"], help="Зняти мут (через роль)")
-    @commands.has_permissions(moderate_members=True)
-    async def untimeout(self, ctx, member: discord.Member, *, reason="Знято модератором"):
-        role = discord.utils.get(ctx.guild.roles, name="Muted")
+    @app_commands.command(name="unmute", description="Зняти мут (через роль)")
+    @app_commands.describe(member="Користувач для розмуту", reason="Причина сняття муту")
+    async def untimeout(self, interaction: discord.Interaction, member: discord.Member, reason: str = "Знято модератором"):
+        if not interaction.user.guild_permissions.moderate_members:
+            return await interaction.response.send_message("❌ У вас немає прав для використання цієї команди.", ephemeral=True)
+            
+        role = discord.utils.get(interaction.guild.roles, name="Muted")
         
         has_role = role and role in member.roles
         is_timeouted = member.is_timed_out()
         
         if not has_role and not is_timeouted:
-            return await ctx.send("❌ Цей учасник не замутений.")
+            return await interaction.response.send_message("❌ Цей учасник не замутений.", ephemeral=True)
             
         try:
             if has_role:
@@ -163,12 +170,12 @@ class Moderation(commands.Cog):
                 
             embed = discord.Embed(title="🔊 Мут знято", color=discord.Color.green())
             embed.add_field(name="Користувач", value=f"{member.mention}", inline=True)
-            embed.add_field(name="Модератор", value=ctx.author.mention, inline=True)
-            await ctx.send(embed=embed)
+            embed.add_field(name="Модератор", value=interaction.user.mention, inline=True)
+            await interaction.response.send_message(embed=embed)
         except discord.Forbidden:
-            await ctx.send("❌ Недостатньо прав для розмуту цього учасника.")
+            await interaction.response.send_message("❌ Недостатньо прав для розмуту цього учасника.", ephemeral=True)
         except Exception as e:
-            await ctx.send(f"❌ Сталася помилка: {e}")
+            await interaction.response.send_message(f"❌ Сталася помилка: {e}", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Moderation(bot))
