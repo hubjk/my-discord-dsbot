@@ -328,14 +328,14 @@ class Stats(commands.Cog):
                 await self.post_summary(guild, channel, "week", "тиждень", "words_week", "words_week = 0")
                 await self.bot.db.execute('UPDATE server_settings SET last_weekly_reset = ? WHERE guild_id = ?', (current_week, guild_id))
                 
-            # 2. Щомісячні підсумки (Останній день місяця, 20:00+)
+            # 2. Щомісячні підсумки (Останній день місяця, 21:00+)
             last_day_of_month = calendar.monthrange(now.year, now.month)[1]
-            if last_month != current_month and now.day == last_day_of_month and now.hour >= 20:
+            if last_month != current_month and now.day == last_day_of_month and now.hour >= 21:
                 await self.post_summary(guild, channel, "month", "місяць", "words_month", "words_month = 0")
                 await self.bot.db.execute('UPDATE server_settings SET last_monthly_reset = ? WHERE guild_id = ?', (current_month, guild_id))
                 
-            # 3. Щорічні підсумки (31 Грудня, 20:00+)
-            if last_year != current_year and now.month == 12 and now.day == 31 and now.hour >= 20:
+            # 3. Щорічні підсумки (31 Грудня, 22:00+)
+            if last_year != current_year and now.month == 12 and now.day == 31 and now.hour >= 22:
                 await self.post_summary(guild, channel, "year", "рік", "words_year", "words_year = 0")
                 await self.bot.db.execute('UPDATE server_settings SET last_yearly_reset = ? WHERE guild_id = ?', (current_year, guild_id))
 
