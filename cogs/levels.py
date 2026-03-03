@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 import random
 import time
@@ -86,10 +87,40 @@ class Levels(commands.Cog):
         self._xp_cache[(user_id, guild_id)] = new_xp
         self._dirty_users.add((user_id, guild_id))
         
-        if new_level > current_level and channel:
-            member = channel.guild.get_member(user_id)
+        if new_level > current_level:
+            guild = self.bot.get_guild(guild_id)
+            member = guild.get_member(user_id) if guild else None
+            
             if member:
-                await channel.send(f"🎉 Вітаємо, {member.mention}! Твоя активність підняла тебе до **{new_level} рівня**!")
+                if channel:
+                    await channel.send(f"🎉 Вітаємо, {member.mention}! Твоя активність підняла тебе до **{new_level} рівня**!")
+                
+                # Check for level roles
+                async with self.bot.db.execute('SELECT add_role_id, remove_role_id FROM level_roles WHERE guild_id = ? AND level = ?', (guild_id, new_level)) as cursor:
+                    role_data = await cursor.fetchone()
+                
+                if role_data:
+                    add_role_id, remove_role_id = role_data
+                    roles_to_add = []
+                    roles_to_remove = []
+                    
+                    if add_role_id:
+                        add_role = member.guild.get_role(add_role_id)
+                        if add_role:
+                            roles_to_add.append(add_role)
+                    
+                    if remove_role_id:
+                        remove_role = member.guild.get_role(remove_role_id)
+                        if remove_role:
+                            roles_to_remove.append(remove_role)
+                            
+                    try:
+                        if roles_to_remove:
+                            await member.remove_roles(*roles_to_remove, reason=f"Отримано {new_level} рівень")
+                        if roles_to_add:
+                            await member.add_roles(*roles_to_add, reason=f"Отримано {new_level} рівень")
+                    except Exception as e:
+                        print(f"[Levels] Помилка видачі/зняття ролей за {new_level} рівень для {member.display_name}: {e}")
         
         # Перевірка досягнень при додаванні XP
         await self.check_achievements(user_id, guild_id, new_xp, channel)
@@ -300,6 +331,53 @@ class Levels(commands.Cog):
         embed.set_footer(text=f"{leader.display_name} попереду на {diff} XP")
         
         await ctx.send(embed=embed)
+
+    # ─── Налаштування ролей за рівні ───────────────────────────────────────
+
+    levelroles = app_commands.Group(name="levelroles", description="Налаштування ролей за рівні", default_permissions=discord.Permissions(administrator=True))
+
+    @levelroles.command(name="add", description="Додати або оновити роль за рівень")
+    @app_commands.describe(level="Рівень для отримання ролей", add_role="Роль для видачі (опціонально)", remove_role="Роль для зняття (опціонально)")
+    async def lr_add(self, interaction: discord.Interaction, level: int, add_role: discord.Role = None, remove_role: discord.Role = None):
+        if not add_role and not remove_role:
+            return await interaction.response.send_message("❌ Вкажіть хоча б одну роль (видати або зняти).", ephemeral=True)
+            
+        add_id = add_role.id if add_role else None
+        remove_id = remove_role.id if remove_role else None
+        
+        await self.bot.db.execute('''
+            INSERT INTO level_roles (guild_id, level, add_role_id, remove_role_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, level) DO UPDATE SET
+            add_role_id=excluded.add_role_id, remove_role_id=excluded.remove_role_id
+        ''', (interaction.guild.id, level, add_id, remove_id))
+        await self.bot.db.commit()
+        
+        await interaction.response.send_message(f"✅ Налаштовано для рівня {level}: видача ролі {add_role.mention if add_role else 'немає'}, зняття ролі {remove_role.mention if remove_role else 'немає'}.", ephemeral=True)
+
+    @levelroles.command(name="remove", description="Вдалити налаштування ролей для рівня")
+    @app_commands.describe(level="Рівень для видалення налаштувань")
+    async def lr_remove(self, interaction: discord.Interaction, level: int):
+        await self.bot.db.execute('DELETE FROM level_roles WHERE guild_id = ? AND level = ?', (interaction.guild.id, level))
+        await self.bot.db.commit()
+        await interaction.response.send_message(f"✅ Видалено налаштування ролей для {level} рівня.", ephemeral=True)
+
+    @levelroles.command(name="list", description="Показати список налаштованих ролей за рівні")
+    async def lr_list(self, interaction: discord.Interaction):
+        async with self.bot.db.execute('SELECT level, add_role_id, remove_role_id FROM level_roles WHERE guild_id = ? ORDER BY level ASC', (interaction.guild.id,)) as cursor:
+            rows = await cursor.fetchall()
+            
+        if not rows:
+            return await interaction.response.send_message("❌ Немає налаштованих ролей за рівні.", ephemeral=True)
+            
+        desc = ""
+        for level_num, add_id, rem_id in rows:
+            add_str = f"<@&{add_id}>" if add_id else "немає"
+            rem_str = f"<@&{rem_id}>" if rem_id else "немає"
+            desc += f"**Рівень {level_num}:** +{add_str} | -{rem_str}\n"
+            
+        embed = discord.Embed(title="Налаштування ролей за рівні", description=desc, color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Levels(bot))

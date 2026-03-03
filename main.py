@@ -179,6 +179,16 @@ class ServerManagementBot(commands.Bot):
         ''')
 
         await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS level_roles (
+                guild_id INTEGER,
+                level INTEGER,
+                add_role_id INTEGER,
+                remove_role_id INTEGER,
+                PRIMARY KEY (guild_id, level)
+            )
+        ''')
+
+        await self.db.execute('''
             CREATE TABLE IF NOT EXISTS voice_activity_stats (
                 user_id INTEGER,
                 guild_id INTEGER,
