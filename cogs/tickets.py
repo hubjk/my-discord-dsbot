@@ -71,6 +71,13 @@ class TicketCreateView(discord.ui.View):
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
         }
         
+        mute_role = discord.utils.get(guild.roles, name="Muted")
+        if mute_role:
+            # Для ролі Muted скасовуємо заборону на написання повідомлень
+            # (оскільки read_messages вже контролюється role доступом юзера, 
+            # нам важливо тільки дати йому можливість говорити в цьому каналі)
+            overwrites[mute_role] = discord.PermissionOverwrite(send_messages=True)
+        
         ticket_channel = await guild.create_text_channel(
             name=f"тікет-{safe_name}",
             category=category,

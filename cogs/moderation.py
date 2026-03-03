@@ -85,7 +85,21 @@ class Moderation(commands.Cog):
         except:
             return None
 
-    @commands.command(name="timeout", aliases=["mute", "мут"], help="Замутити учасника (Тайм-аут)")
+    async def get_or_create_mute_role(self, guild: discord.Guild):
+        role = discord.utils.get(guild.roles, name="Muted")
+        if not role:
+            try:
+                role = await guild.create_role(name="Muted", color=discord.Color.dark_grey(), reason="Роль для муту створена автоматично")
+                for channel in guild.channels:
+                    try:
+                        await channel.set_permissions(role, send_messages=False, speak=False, add_reactions=False)
+                    except discord.Forbidden:
+                        continue
+            except Exception as e:
+                print(f"[Moderation] Не вдалося створити/налаштувати роль Muted: {e}")
+        return role
+
+    @commands.command(name="timeout", aliases=["mute", "мут"], help="Замутити учасника (через роль)")
     @commands.has_permissions(moderate_members=True)
     async def timeout(self, ctx, member: discord.Member, duration: str = "10m", *, reason="Не вказано"):
         if member == ctx.author:
@@ -95,26 +109,58 @@ class Moderation(commands.Cog):
         if seconds is None:
             return await ctx.send("❌ Неправильний формат часу! Використовуйте: `10m`, `1h`, `1d` тощо.")
         
-        if seconds > 2419200: # Ліміт Discord — 28 днів
-            return await ctx.send("❌ Тайм-аут не може бути довшим за 28 днів.")
+        role = await self.get_or_create_mute_role(ctx.guild)
+        if not role:
+            return await ctx.send("❌ Не вдалося знайти або створити роль Muted. Перевірте права бота.")
 
         try:
-            await member.timeout(timedelta(seconds=seconds), reason=reason)
+            # Знімаємо системний тайм-аут, якщо він є (на всяк випадок)
+            try:
+                await member.timeout(None, reason="Переведення муту на рольову систему")
+            except:
+                pass
+                
+            await member.add_roles(role, reason=reason)
             embed = discord.Embed(title="🤫 Учасника замучено", color=discord.Color.orange())
             embed.add_field(name="Користувач", value=f"{member.mention}", inline=True)
             embed.add_field(name="Тривалість", value=duration, inline=True)
             embed.add_field(name="Причина", value=reason, inline=False)
+            embed.set_footer(text="Тепер мут працює через роль (дозволяє писати в тікетах).")
             await ctx.send(embed=embed)
+            
+            import asyncio
+            self.bot.loop.create_task(self.unmute_timer(member, role, seconds))
         except discord.Forbidden:
-            await ctx.send("❌ Недостатньо прав для муту цього учасника.")
+            await ctx.send("❌ Недостатньо прав для муту цього учасника (роль бота нижча).")
         except Exception as e:
             await ctx.send(f"❌ Сталася помилка: {e}")
 
-    @commands.command(name="untimeout", aliases=["unmute", "розмут"], help="Зняти мут (Тайм-аут)")
+    async def unmute_timer(self, member: discord.Member, role: discord.Role, seconds: int):
+        import asyncio
+        await asyncio.sleep(seconds)
+        if role in member.roles:
+            try:
+                await member.remove_roles(role, reason="Час муту вийшов")
+            except:
+                pass
+
+    @commands.command(name="untimeout", aliases=["unmute", "розмут"], help="Зняти мут (через роль)")
     @commands.has_permissions(moderate_members=True)
     async def untimeout(self, ctx, member: discord.Member, *, reason="Знято модератором"):
+        role = discord.utils.get(ctx.guild.roles, name="Muted")
+        
+        has_role = role and role in member.roles
+        is_timeouted = member.is_timed_out()
+        
+        if not has_role and not is_timeouted:
+            return await ctx.send("❌ Цей учасник не замутений.")
+            
         try:
-            await member.timeout(None, reason=reason)
+            if has_role:
+                await member.remove_roles(role, reason=reason)
+            if is_timeouted:
+                await member.timeout(None, reason=reason)
+                
             embed = discord.Embed(title="🔊 Мут знято", color=discord.Color.green())
             embed.add_field(name="Користувач", value=f"{member.mention}", inline=True)
             embed.add_field(name="Модератор", value=ctx.author.mention, inline=True)
