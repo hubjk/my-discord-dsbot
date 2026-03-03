@@ -3,6 +3,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime
 import re
+import calendar
+import aiosqlite
 
 async def is_admin(ctx):
     # Підтримка і Context, і Interaction
@@ -244,6 +246,33 @@ class Stats(commands.Cog):
         await self.bot.db.commit()
         await ctx.send(f"✅ Канал для підсумків активності встановлено на {channel.mention}.")
 
+    @commands.command(name="force_summary", help="Примусово показати підсумок для перевірки (тільки для адмінів). Варіанти: week, month, year, all")
+    @commands.check(is_admin)
+    async def force_summary(self, ctx, period: str = None):
+        if period not in ["week", "month", "year", "all"]:
+            return await ctx.send("❌ Будь ласка, вкажіть період: `week`, `month`, `year` або `all`.")
+        
+        async with self.bot.db.execute('SELECT summary_channel_id FROM server_settings WHERE guild_id = ?', (ctx.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+            
+        channel_id = row[0] if row else None
+        channel = ctx.guild.get_channel(channel_id) if channel_id else ctx.channel
+        
+        period_map = {
+            "week": ("week", "тиждень", "words_week", "words_week = 0"),
+            "month": ("month", "місяць", "words_month", "words_month = 0"),
+            "year": ("year", "рік", "words_year", "words_year = 0")
+        }
+        
+        periods_to_run = ["week", "month", "year"] if period == "all" else [period]
+        
+        await ctx.send(f"🛠️ **Тестовий режим відображення підсумків.** Дані не будуть видалені, архів не створюється.")
+        for p in periods_to_run:
+            ptype, pname, tcol, rquery = period_map[p]
+            await self.post_summary(ctx.guild, channel, ptype, pname, tcol, rquery, is_test=True)
+            import asyncio
+            await asyncio.sleep(2)
+
     @app_commands.command(name="privacy", description="Налаштувати свою приватність")
     async def privacy(self, interaction: discord.Interaction):
         # Перевірка чи ми в гільдії
@@ -294,18 +323,19 @@ class Stats(commands.Cog):
             if not channel:
                 continue
 
-            # 1. Щотижневі підсумки
-            if last_week != current_week:
+            # 1. Щотижневі підсумки (Неділя, 20:00+)
+            if last_week != current_week and now.weekday() == 6 and now.hour >= 20:
                 await self.post_summary(guild, channel, "week", "тиждень", "words_week", "words_week = 0")
                 await self.bot.db.execute('UPDATE server_settings SET last_weekly_reset = ? WHERE guild_id = ?', (current_week, guild_id))
                 
-            # 2. Щомісячні підсумки
-            if last_month != current_month:
+            # 2. Щомісячні підсумки (Останній день місяця, 20:00+)
+            last_day_of_month = calendar.monthrange(now.year, now.month)[1]
+            if last_month != current_month and now.day == last_day_of_month and now.hour >= 20:
                 await self.post_summary(guild, channel, "month", "місяць", "words_month", "words_month = 0")
                 await self.bot.db.execute('UPDATE server_settings SET last_monthly_reset = ? WHERE guild_id = ?', (current_month, guild_id))
                 
-            # 3. Щорічні підсумки
-            if last_year != current_year:
+            # 3. Щорічні підсумки (31 Грудня, 20:00+)
+            if last_year != current_year and now.month == 12 and now.day == 31 and now.hour >= 20:
                 await self.post_summary(guild, channel, "year", "рік", "words_year", "words_year = 0")
                 await self.bot.db.execute('UPDATE server_settings SET last_yearly_reset = ? WHERE guild_id = ?', (current_year, guild_id))
 
@@ -345,7 +375,7 @@ class Stats(commands.Cog):
             return f"{hours} год"
         return f"{hours} год {minutes} хв"
 
-    async def post_summary(self, guild, channel, period_type, period_name, text_column, reset_query):
+    async def post_summary(self, guild, channel, period_type, period_name, text_column, reset_query, is_test=False):
         """Публікує ТОП-10 та обнуляє лічильник для вказаного періоду."""
         
         # Визначаємо колонку для голосу на основі текстової
@@ -437,9 +467,36 @@ class Stats(commands.Cog):
                 await self.assign_dynamic_roles(guild, speaker_rid, writer_rid, voice_ranks, text_ranks)
         
         # 5. Обнуляємо лічильники тексту та голосу за цей період
-        await self.bot.db.execute(f'UPDATE text_stats SET {reset_query} WHERE guild_id = ?', (guild.id,))
-        await self.bot.db.execute(f'UPDATE voice_activity_stats SET {voice_reset} WHERE guild_id = ?', (guild.id,))
-        await self.bot.db.commit()
+        if not is_test:
+            await self.bot.db.execute(f'UPDATE text_stats SET {reset_query} WHERE guild_id = ?', (guild.id,))
+            await self.bot.db.execute(f'UPDATE voice_activity_stats SET {voice_reset} WHERE guild_id = ?', (guild.id,))
+            await self.bot.db.commit()
+
+            # 6. Архівуємо дані
+            try:
+                async with aiosqlite.connect('archive.db') as arch_db:
+                    await arch_db.execute('''
+                        CREATE TABLE IF NOT EXISTS archived_stats (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            guild_id INTEGER,
+                            user_id INTEGER,
+                            period_type TEXT,
+                            period_name TEXT,
+                            score INTEGER,
+                            words INTEGER,
+                            voice_sec INTEGER,
+                            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    arch_data = [(guild.id, uid, period_type, period_name, score, words, voice_sec) for (uid, score, words, voice_sec) in top_10]
+                    if arch_data:
+                        await arch_db.executemany('''
+                            INSERT INTO archived_stats (guild_id, user_id, period_type, period_name, score, words, voice_sec)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ''', arch_data)
+                        await arch_db.commit()
+            except Exception as e:
+                print(f"[Stats] Помилка збереження архіву: {e}")
 
     @tasks.loop(minutes=1.0)
     async def save_text_task(self):
