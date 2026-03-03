@@ -412,8 +412,14 @@ class Stats(commands.Cog):
             
             if score > 0:
                 users_scores.append((uid, score, words, voice_seconds))
-
         if not users_scores:
+            if is_test:
+                embed = discord.Embed(
+                    title=f"📊 Підсумки активності за {period_name}", 
+                    description="Немає активності за цей період.", 
+                    color=discord.Color.light_grey()
+                )
+                await channel.send(embed=embed)
             return # Немає активності
             
         # Сортуємо за загальним балом і беремо ТОП 10
