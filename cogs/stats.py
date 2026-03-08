@@ -281,6 +281,23 @@ class Stats(commands.Cog):
             import asyncio
             await asyncio.sleep(2)
 
+    @app_commands.command(name="reset_summary_dates", description="Скинути дати зупинки підсумків (щоб бот надіслав підсумок знову)")
+    async def reset_summary_dates(self, interaction: discord.Interaction):
+        if not await is_admin(interaction):
+            return await interaction.response.send_message("❌ У вас немає прав для використання цієї команди.", ephemeral=True)
+            
+        await self.bot.db.execute('''
+            UPDATE server_settings 
+            SET last_weekly_reset = '2026-W01', 
+                last_monthly_reset = '2026-01', 
+                last_yearly_reset = '2025' 
+            WHERE guild_id = ?
+        ''', (interaction.guild.id,))
+        await self.bot.db.commit()
+        
+        await interaction.response.send_message("✅ Внутрішня пам'ять бота про останні підсумки була скинута.\nТепер, якщо настав час (наприклад, Неділя 20:00), бот надішле підсумки протягом години або одразу після перезапуску.", ephemeral=True)
+
+
     @app_commands.command(name="privacy", description="Налаштувати свою приватність")
     async def privacy(self, interaction: discord.Interaction):
         # Перевірка чи ми в гільдії
