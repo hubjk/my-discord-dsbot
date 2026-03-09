@@ -9,7 +9,7 @@ audioop-lts==0.2.2; python_version >= '3.13'
 certifi==2026.1.4
 cffi==2.0.0
 git+https://github.com/Rapptz/discord.py.git@master#egg=discord.py[voice]
-python-davey>=0.2.0
+davey
 distro==1.9.0
 frozenlist==1.8.0
 h11==0.16.0
